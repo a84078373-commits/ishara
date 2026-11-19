@@ -1,6 +1,8 @@
 """Ishara — Flask server (UI + high-precision recognition API + TTS cache)."""
 from __future__ import annotations
 
+import os
+
 from flask import Flask, jsonify, request, send_from_directory, send_file
 from flask_cors import CORS
 
@@ -186,5 +188,6 @@ def static_proxy(path: str):
 
 
 if __name__ == '__main__':
-    print('Ishara Flask → http://127.0.0.1:5173')
-    app.run(host='127.0.0.1', port=5173, debug=False, threaded=True)
+    port = int(os.environ.get('PORT', '5173'))
+    print(f'Ishara Flask → http://127.0.0.1:{port}')
+    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)

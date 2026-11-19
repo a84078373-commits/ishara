@@ -2,13 +2,22 @@ import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT / 'data'
-SIGNS_PATH = DATA_DIR / 'signs.json'
-AUDIO_DIR = DATA_DIR / 'audio'
 DIST_DIR = ROOT / 'dist'
 
-DATA_DIR.mkdir(exist_ok=True)
-AUDIO_DIR.mkdir(exist_ok=True)
+# On Render Free, filesystem is ephemeral unless a disk is mounted at /var/data
+_data_env = os.getenv('DATA_DIR', '').strip()
+if _data_env:
+    DATA_DIR = Path(_data_env)
+elif Path('/var/data').exists():
+    DATA_DIR = Path('/var/data/ishara')
+else:
+    DATA_DIR = ROOT / 'data'
+
+SIGNS_PATH = DATA_DIR / 'signs.json'
+AUDIO_DIR = DATA_DIR / 'audio'
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
 SEQ_LEN = 16
 FEAT_DIM = 152
