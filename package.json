@@ -1,0 +1,12 @@
+{
+  "name": "ishara-saudi",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "python app.py",
+    "start:static": "python -m http.server 5173 --directory dist",
+    "test": "node --test tests/core.test.mjs",
+    "test:py": "python -c \"from backend.recognition import classify; print('ok')\""
+  }
+}

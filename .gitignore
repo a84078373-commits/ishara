@@ -1,0 +1,10 @@
+dist/local-config.js
+node_modules/
+.venv/
+data/
+__pycache__/
+*.pyc
+.DS_Store
+*.log
+.env
+.openai/

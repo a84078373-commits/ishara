@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#06080a">
+  <title>إشارة — من اليد إلى الصوت</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <link rel="modulepreload" href="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/vision_bundle.mjs">
+  <link rel="preload" href="https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task" as="fetch" crossorigin>
+</head>
+<body>
+<header>
+  <a class="brand" href="#">
+    <span class="brand-mark">ع</span>
+    <span class="brand-text">إشارة<small>ISHARA VISION</small></span>
+  </a>
+  <nav>
+    <button class="nav active" data-view="live">الترجمة المباشرة</button>
+    <button class="nav" data-view="library">مكتبة الإشارات <span>20</span></button>
+    <button id="help">كيف أبدأ؟</button>
+    <button id="voice-settings">الصوت</button>
+  </nav>
+  <div class="private"><i></i> Flask · تتبع محلي · تعرّف على السيرفر</div>
+</header>
+
+<main>
+  <div class="hero">
+    <div>
+      <div class="eyebrow">نموذج قابل للتدريب <span>/</span> Flask + ML</div>
+      <h1>علّمه كلماتك.<br><em>يفهم إشارتك.</em></h1>
+      <p class="hero-lead">نموذج تعلّم حقيقي على السيرفر: تضيف الكلمات، تسجّل الأمثلة، ويُعاد تدريبه تلقائيًا ثم يتعرّف وينطق.</p>
+    </div>
+    <div class="hero-side">
+      <div class="lang-pill">
+        <span>🇸🇦</span>
+        <div>لغة الإشارة السعودية<small>تتعلّم من أمثلتك أنت</small></div>
+      </div>
+      <div class="accuracy-pill">
+        <span>21×2</span>
+        <div>مفاصل دقيقة<small>شكل اليد + سرعة الحركة</small></div>
+      </div>
+    </div>
+  </div>
+
+  <section id="live-view">
+    <div class="workspace">
+      <div class="camera panel">
+        <div class="panel-top">
+          <span><i class="dot" id="camera-dot"></i> <b id="camera-state">الكاميرا غير مفعّلة</b></span>
+          <span class="mono">LIVE VISION <span class="muted">/ PRO</span></span>
+        </div>
+        <div class="viewport">
+          <video id="video" muted playsinline></video>
+          <canvas id="overlay"></canvas>
+          <div class="grid"></div>
+          <div id="camera-empty">
+            <div class="hand-orbit"><span>✋</span></div>
+            <h2>كل إشارة لها صوت</h2>
+            <p>فعّل الكاميرا وخلّ يدك ظاهرة بوضوح.<br>الفيديو يُعالج في متصفحك ولا يُرفع أبدًا.</p>
+            <div id="model-status" class="model-status">⏳ تجهيز متتبّع اليد في الخلفية…</div>
+            <button id="start" class="primary">◉ &nbsp; تشغيل الكاميرا</button>
+            <small id="model-hint">أول مرة فقط يحتاج إنترنت لتحميل النموذج (~10–20 ث). بعدها يصير أسرع من الكاش.</small>
+          </div>
+          <div id="recording" hidden></div>
+          <div id="coach" class="coach" hidden>
+            <div id="coach-title">التدريب</div>
+            <div id="coach-step">—</div>
+            <div id="coach-hand">○ بانتظار اليد</div>
+            <div class="coach-meter"><i id="coach-fill"></i></div>
+            <div id="coach-hint">ارفع يدك داخل الإطار</div>
+          </div>
+          <div class="camera-corner top-right"></div>
+          <div class="camera-corner bottom-left"></div>
+          <div class="camera-hud">
+            <span id="hands">○ بانتظار اليد</span>
+            <span id="fps">— FPS</span>
+          </div>
+        </div>
+        <div class="camera-bottom">
+          <span>✦ إضاءة جيدة · اليد داخل الإطار · أقرب للكاميرا = أدق</span>
+          <div>
+            <button id="mirror" aria-pressed="true">⇄ عكس الصورة</button>
+            <button id="stop" disabled>إيقاف</button>
+          </div>
+        </div>
+      </div>
+
+      <aside class="results">
+        <div class="panel recognition" id="recognition-panel">
+          <div class="panel-top">
+            <span>نتيجة التعرّف</span>
+            <span class="mini-tag">مباشر</span>
+          </div>
+          <div class="result-stage">
+            <div class="result-ring" id="result-ring">⌁</div>
+            <div id="result" aria-live="polite">بانتظار إشارتك</div>
+            <p id="result-note">من المكتبة: اختر كلمة ← ابدأ التسجيل ← مثالان على الأقل</p>
+            <div id="verify-banner" class="verify-banner" hidden></div>
+          </div>
+          <div class="meter"><div id="meter-fill"></div></div>
+          <div class="score">
+            <span>درجة التشابه <small>(تقريبية)</small></span>
+            <b id="score">—</b>
+          </div>
+          <div class="speech-row">
+            <label><input type="checkbox" id="auto-speak" checked> نطق تلقائي (مقطع محفوظ)</label>
+            <button id="speak" title="تشغيل المقطع المحفوظ" disabled>◖))</button>
+          </div>
+          <small id="voice-status"></small>
+        </div>
+        <div class="panel history-panel">
+          <div class="panel-top">
+            <span>سجل المحادثة</span>
+            <button id="clear">مسح</button>
+          </div>
+          <div id="history">
+            <div class="history-empty">ستظهر إشاراتك هنا<br><small>لتبقى المحادثة متصلة</small></div>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <div class="under-grid">
+      <div class="tip">
+        <span>↗</span>
+        <div>
+          <b>أول مرة؟ علّم النظام حركتك.</b>
+          <p>أضف كلمة، سجّل مثالين بوضوح (واليد ظاهرة)، ثم اضغط اختبار التعرّف.</p>
+        </div>
+        <button id="go-library">ابدأ التدريب ←</button>
+      </div>
+      <div class="stat">
+        <span id="trained-count">00 <small>/ 20</small></span>
+        <p>إشارة/حركة جاهزة للتعرّف</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="library-view" hidden>
+    <div class="library-top">
+      <div>
+        <h2>قاموسك، بطريقتك.</h2>
+        <p>علّم أي كلمة أو حركة. كل مثال يحفظ مسار المفاصل والسرعة بدقة عالية على جهازك.</p>
+      </div>
+      <div class="library-actions">
+        <button id="add-sign" class="primary">＋ إضافة كلمة / حركة</button>
+        <button id="export">↓ تصدير</button>
+        <button id="import">↑ استيراد</button>
+        <input type="file" id="import-file" accept="application/json" hidden>
+      </div>
+    </div>
+    <div class="notice">ⓘ نموذج تعلّم حقيقي (ExtraTrees) يتدرّب على كلماتك. أضف كلمة → سجّل أمثلة → يُعاد تدريب النموذج تلقائيًا. يعتمد على اليدين والحركة (بدون تعبير وجه).</div>
+    <div id="signs" class="sign-grid"></div>
+  </section>
+
+  <div id="status" role="status" hidden></div>
+
+  <footer>
+    <span>إشارة <b>·</b> مساحة أوسع للتواصل</span>
+    <span>تتبع مفاصل + حركة <b>·</b> صوت عربي <b>·</b> خصوصية أولًا</span>
+  </footer>
+</main>
+
+<dialog id="trainer">
+  <div class="dialog-top">
+    <h2 id="train-title">تدريب إشارة / حركة</h2>
+    <button id="close-trainer" aria-label="إغلاق">×</button>
+  </div>
+  <label class="field">الكلمة أو اسم الحركة
+    <input id="sign-name" maxlength="40" placeholder="مثل: لكمه، مرحبًا، توقف">
+  </label>
+  <p>اضغط التسجيل — الكاميرا تشتغل تلقائيًا إن لزم. ستظهر إرشادات على الشاشة: عدّ تنازلي ثم نفّذ الإشارة (~3 ثوانٍ). يكفي مثالان للتعرّف، و3 أفضل.</p>
+  <p class="notice">طوال التسجيل لازم تظهر اليد (الهيكل الوردي/الليموني). إذا اختفت اليد، النظام ينبّهك فورًا.</p>
+  <div id="take-count"></div>
+  <div id="train-status" class="train-status" hidden></div>
+  <button id="record" class="primary">● ابدأ التسجيل الآن</button>
+  <button id="test-sign" class="test-btn" hidden>✓ اختبر التعرّف الآن</button>
+  <button id="delete-sign" class="danger">حذف أمثلة هذه الإشارة</button>
+</dialog>
+
+<div id="success-flash" hidden>
+  <div class="success-card">
+    <div class="success-check">✓</div>
+    <h2 id="success-title">نجح التعرّف</h2>
+    <p id="success-word"></p>
+    <p id="success-sub">الإشارة التي علّمتها تم التعرّف عليها بنجاح</p>
+    <button id="success-ok" class="primary">تمام</button>
+  </div>
+</div>
+
+<dialog id="voice-dialog">
+  <div class="dialog-top">
+    <h2>صوت ElevenLabs</h2>
+    <button id="close-voice" aria-label="إغلاق">×</button>
+  </div>
+  <p>يُولَّد مقطع الصوت <b>مرة واحدة</b> لكل كلمة عند التدريب، ثم يُحفظ على جهازك ويُشغَّل محليًا عند التعرّف — بلا طلب جديد في كل مرة.</p>
+  <label class="field">مفتاح API
+    <input id="eleven-key" type="password" autocomplete="off" placeholder="sk_...">
+  </label>
+  <label class="field">معرّف الصوت (Voice ID)
+    <input id="eleven-voice" maxlength="80" placeholder="aMmeBf0lzDYlouyfqNjh">
+  </label>
+  <p class="notice">المفتاح يبقى في متصفحك فقط. إن ظهر المفتاح في محادثة أو مستودع عام، أعد إنشاؤه من لوحة ElevenLabs.</p>
+  <button id="save-voice" class="primary">حفظ الإعدادات</button>
+</dialog>
+
+<dialog id="help-dialog">
+  <div class="dialog-top">
+    <h2>من الإشارة إلى الكلمة</h2>
+    <button id="close-help" aria-label="إغلاق">×</button>
+  </div>
+  <ol>
+    <li>فعّل الكاميرا — يظهر هيكل المفاصل فوق يدك.</li>
+    <li>افتح المكتبة واختر كلمة، أو أضف حركة جديدة.</li>
+    <li>سجّل 3 أمثلة على الأقل بزوايا مختلفة.</li>
+    <li>ارجع للترجمة المباشرة ونفّذ الحركة.</li>
+  </ol>
+  <p>البيانات تُحفظ محليًا في المتصفح. صدّر نسخة احتياطية عند الحاجة. لا تُحفظ لقطات الفيديو.</p>
+  <p class="notice">هذا نموذجك أنت: كل كلمة تضيفها وتدرّبها تدخل في نموذج التصنيف على السيرفر. كلّما زادت الأمثلة صار أدق.</p>
+</dialog>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
