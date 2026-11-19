@@ -4,7 +4,7 @@ import {
 } from './core.mjs';
 import {
   getVoiceConfig, setVoiceConfig, ensureClip, playClip, hasCachedClip,
-  deleteCachedClip, DEFAULT_VOICE_ID,
+  getCachedClip, deleteCachedClip, DEFAULT_VOICE_ID,
 } from './voice.mjs';
 import * as api from './api.mjs';
 
@@ -28,13 +28,14 @@ let engineLabel = 'محلي';
 
 let model, stream, running = false, starting = false, raf, lastVideo = -1, lastDetect = 0;
 let lastFeature = 0, buffer = [], current = null, selected = 0, recording = false, capture = [];
-let mirror = true, pending = null, pendingAt = 0, latched = null, noHandAt = 0;
+let mirror = true, pending = null, pendingAt = 0, latched = null, latchedAt = 0, noHandAt = 0;
 let frameCount = 0, fpsAt = 0, toastTimer, session = 0;
 let smoothHands = [], trails = [[], []];
 let verifyTarget = null;
 let verifyFailAt = 0;
 let recognizing = false;
 let lastRecognizeAt = 0;
+const SAME_SIGN_COOLDOWN_MS = 900; // allow switching words instantly; same word after short gap
 
 const video = $('video');
 const canvas = $('overlay');
@@ -73,6 +74,8 @@ async function bootBackend() {
     toast(`✓ Flask + ML جاهز — ${modelMsg}`);
     const st = $('voice-status');
     if (st) st.textContent = `Flask ML · ${modelMsg}`;
+    // Warm every word's mp3 into memory (generate missing once, then instant play)
+    warmAllVoices().catch(() => {});
   } catch {
     flaskMode = false;
     engineLabel = 'محلي';
@@ -83,6 +86,19 @@ async function bootBackend() {
       toast('تعذّر قراءة التدريب المحلي.');
     }
     toast('Flask غير متصل — يعمل الوضع المحلي. شغّل: python app.py');
+    Promise.allSettled(signs.map(async (s) => {
+      try {
+        const blob = await getCachedClip(s.id, s.name);
+        if (!blob?.size) return;
+        const prev = readyAudio.get(s.id);
+        if (prev?.src?.startsWith('blob:')) URL.revokeObjectURL(prev.src);
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.preload = 'auto';
+        audio._isharaText = s.name;
+        readyAudio.set(s.id, audio);
+      } catch { /* ignore */ }
+    })).then(() => render());
   }
   render();
 }
@@ -134,8 +150,9 @@ function render() {
     const title = document.createElement('h3');
     title.textContent = s.name;
     const p = document.createElement('p');
+    const voiceBit = readyAudio.has(s.id) ? ' · صوت جاهز' : '';
     p.textContent = s.samples.length >= MIN_SAMPLES
-      ? `${s.samples.length} أمثلة · جاهزة للتعرّف`
+      ? `${s.samples.length} أمثلة · جاهزة للتعرّف${voiceBit}`
       : `${s.samples.length} / ${MIN_SAMPLES} أمثلة · تحتاج تدريبًا`;
     const bar = document.createElement('div');
     bar.className = 'bar';
@@ -150,10 +167,23 @@ function render() {
     } else {
       card.append(n, title, p, bar);
     }
+    const actions = document.createElement('div');
+    actions.className = 'sign-actions';
     const btn = document.createElement('button');
+    btn.type = 'button';
     btn.textContent = s.samples.length ? 'تعديل التدريب ↗' : '＋ تعليم هذه الإشارة';
     btn.onclick = () => openTrainer(s.id);
-    card.append(btn);
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'danger-btn';
+    del.textContent = 'حذف';
+    del.title = 'حذف الكلمة نهائيًا';
+    del.onclick = (e) => {
+      e.stopPropagation();
+      deleteWord(s.id);
+    };
+    actions.append(btn, del);
+    card.append(actions);
     return card;
   }));
 }
@@ -269,10 +299,15 @@ $('sign-name').onchange = async () => {
       if (flaskMode) {
         const res = await api.renameSign(selected, name);
         signs[selected] = fromApiSign(res.sign);
+        if (prev !== name) {
+          readyAudio.delete(selected);
+          cacheVoiceForSign(signs[selected]).catch(() => {});
+        }
       } else {
         if (prev !== name) {
           try { await deleteCachedClip(selected, prev); } catch { /* ignore */ }
           signs[selected].verified = false;
+          cacheVoiceForSign(signs[selected]).catch(() => {});
         }
         signs[selected].name = name;
         persist();
@@ -288,9 +323,14 @@ $('sign-name').onchange = async () => {
   }
 };
 
+$('delete-word')?.addEventListener('click', () => {
+  if (recording) return;
+  deleteWord(selected);
+});
+
 $('delete-sign').onclick = async () => {
   if (recording) return;
-  if (!confirm('حذف جميع أمثلة هذه الإشارة؟')) return;
+  if (!confirm('حذف جميع أمثلة هذه الإشارة؟ (الكلمة تبقى)')) return;
   try {
     if (flaskMode) {
       const res = await api.clearSamples(selected);
@@ -312,6 +352,41 @@ $('delete-sign').onclick = async () => {
   }
 };
 
+async function deleteWord(id) {
+  if (recording) return;
+  const word = signs[id]?.name || '';
+  if (!confirm(`حذف الكلمة «${word}» نهائيًا مع أمثلتها والصوت؟`)) return;
+  try {
+    if (flaskMode) {
+      const res = await api.deleteSign(id);
+      signs = res.signs.map(fromApiSign);
+      clearAudioCache();
+      warmAllVoices().catch(() => {});
+    } else {
+      if (signs.length <= 1) throw Error('يجب الإبقاء على كلمة واحدة على الأقل');
+      try { await deleteCachedClip(id, word); } catch { /* ignore */ }
+      signs.splice(id, 1);
+      signs.forEach((s, i) => { s.id = i; });
+      persist();
+      clearAudioCache();
+    }
+    if (selected >= signs.length) selected = Math.max(0, signs.length - 1);
+    if (verifyTarget === id) {
+      verifyTarget = null;
+      setVerifyBanner('', '');
+    } else if (verifyTarget != null && verifyTarget > id) {
+      verifyTarget -= 1;
+    }
+    if ($('trainer').open) $('trainer').close();
+    latched = null;
+    current = null;
+    render();
+    toast(`تم حذف «${word}»`);
+  } catch (e) {
+    toast(e.message || 'تعذّر الحذف');
+  }
+}
+
 $('add-sign')?.addEventListener('click', async () => {
   if (signs.length >= MAX_SIGNS) return toast(`الحد الأقصى ${MAX_SIGNS} إشارة.`);
   const name = prompt('اسم الإشارة / الكلمة الجديدة:', 'كلمة جديدة');
@@ -321,11 +396,16 @@ $('add-sign')?.addEventListener('click', async () => {
       const res = await api.createSign(name.trim());
       signs.push(fromApiSign(res.sign));
       openTrainer(res.sign.id);
+      // Generate+cache voice file once in background
+      cacheVoiceForSign(signs[res.sign.id]).then((ok) => {
+        if (ok) toast(`صوت «${res.sign.name}» محفوظ — النطق سيكون فوريًا`);
+      });
     } else {
       const id = signs.length;
       signs.push({ id, name: name.trim().slice(0, 40), samples: [], verified: false, verifyHits: 0 });
       persist();
       openTrainer(id);
+      cacheVoiceForSign(signs[id]).catch(() => {});
     }
     render();
     toast('أُضيفت الإشارة. سجّل مثالين على الأقل.');
@@ -341,9 +421,14 @@ function browserVoice() {
 async function updateVoice() {
   const el = $('voice-status');
   if (flaskMode) {
-    el.textContent = current
-      ? `Flask TTS · «${current.name}» · مقطع على السيرفر`
-      : 'Flask + ElevenLabs · المقطع يُجلب مرة ويُحفظ في السيرفر';
+    const n = readyAudio.size;
+    if (current && readyAudio.has(current.id)) {
+      el.textContent = `نطق فوري · «${current.name}» محفوظ في الذاكرة`;
+    } else if (n) {
+      el.textContent = `${n} مقطع جاهز · النطق من الذاكرة بدون ElevenLabs`;
+    } else {
+      el.textContent = 'ElevenLabs يُستدعى مرة عند إضافة الكلمة فقط · ثم نطق فوري';
+    }
     return;
   }
   const cfg = getVoiceConfig();
@@ -368,80 +453,127 @@ function speakBrowser(text) {
 }
 
 let serverAudio = null;
-const audioCache = new Map(); // signId -> HTMLAudioElement (preloaded)
+/** In-memory Audio elements with blob: URLs — play is instant, no network/ElevenLabs. */
+const readyAudio = new Map(); // signId -> HTMLAudioElement
 
-function getPreloadedAudio(signId, text) {
-  const key = String(signId);
-  let a = audioCache.get(key);
-  const url = api.audioUrl(signId, text);
-  if (!a || a._isharaUrl !== url) {
-    a = new Audio(url);
-    a.preload = 'auto';
-    a._isharaUrl = url;
-    audioCache.set(key, a);
+function clearAudioCache() {
+  for (const a of readyAudio.values()) {
+    try {
+      a.pause();
+      if (a.src.startsWith('blob:')) URL.revokeObjectURL(a.src);
+    } catch { /* ignore */ }
   }
-  return a;
+  readyAudio.clear();
+  serverAudio = null;
 }
 
-/** Play cached server audio instantly — no ensureVoice round-trip first. */
-async function speak(signId, text, { forceFetch = false } = {}) {
-  if (flaskMode) {
-    try {
-      if (serverAudio) {
-        try { serverAudio.pause(); } catch { /* ignore */ }
-        serverAudio.currentTime = 0;
-      }
-      const audio = getPreloadedAudio(signId, text);
-      serverAudio = audio;
-      audio.currentTime = 0;
-      await audio.play();
-      updateVoice();
-      return true;
-    } catch {
-      // File may not exist yet — generate once, preload, play
-      try {
-        await api.ensureVoice(signId, text);
-        const audio = getPreloadedAudio(signId, text + (forceFetch ? '' : ''));
-        audio.src = api.audioUrl(signId, text) + `&r=${Date.now()}`;
-        audio._isharaUrl = audio.src;
-        serverAudio = audio;
-        audio.currentTime = 0;
-        await audio.play();
-        updateVoice();
-        return true;
-      } catch (e) {
-        speakBrowser(text);
-        return false;
-      }
-    }
+function stopSpeaking() {
+  if (serverAudio) {
+    try { serverAudio.pause(); serverAudio.currentTime = 0; } catch { /* ignore */ }
   }
+  try { speechSynthesis?.cancel(); } catch { /* ignore */ }
+}
+
+/** Load a cached mp3 into memory. Never generates TTS. Returns true if ready. */
+async function loadClipIntoMemory(signId, text) {
+  const name = String(text || '').trim();
+  if (!name) return false;
   try {
-    const { blob, fromCache } = await ensureClip(signId, text, { force: forceFetch });
-    await playClip(blob);
-    if (!fromCache) toast(`تم حفظ مقطع صوت «${text}» محليًا`);
-    updateVoice();
+    const res = await fetch(api.audioUrl(signId, name));
+    if (!res.ok) return false;
+    const blob = await res.blob();
+    if (!blob.size) return false;
+    const prev = readyAudio.get(signId);
+    if (prev?.src?.startsWith('blob:')) {
+      try { URL.revokeObjectURL(prev.src); } catch { /* ignore */ }
+    }
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    audio.preload = 'auto';
+    audio._isharaText = name;
+    readyAudio.set(signId, audio);
+    // Decode ahead so first play has zero buffer delay
+    try { audio.load(); } catch { /* ignore */ }
     return true;
   } catch {
-    speakBrowser(text);
     return false;
   }
 }
 
+/**
+ * Live speak: ONLY from in-memory Audio. Zero ElevenLabs / network wait.
+ * Missing clip → browser TTS now; generate+warm in background for next time.
+ */
+function speak(signId, text) {
+  const name = String(text || '').trim();
+  stopSpeaking();
+
+  const cached = readyAudio.get(signId);
+  if (cached && cached._isharaText === name) {
+    try {
+      cached.currentTime = 0;
+      serverAudio = cached;
+      const p = cached.play();
+      if (p && typeof p.catch === 'function') p.catch(() => speakBrowser(name));
+      updateVoice();
+      return Promise.resolve(true);
+    } catch {
+      /* fall through */
+    }
+  }
+
+  // Do not await fetch/ensure here — keeps gesture→speech instant
+  speakBrowser(name);
+  (async () => {
+    if (flaskMode) {
+      const loaded = await loadClipIntoMemory(signId, name);
+      if (!loaded) await cacheVoiceForSign({ id: signId, name });
+    } else {
+      await cacheVoiceForSign({ id: signId, name });
+    }
+  })().catch(() => {});
+  return Promise.resolve(false);
+}
+
+/** Generate+cache once (add/train/rename/boot) then load into memory. */
 async function cacheVoiceForSign(sign) {
-  if (!sign?.name) return;
+  if (!sign?.name) return false;
   try {
     if (flaskMode) {
       await api.ensureVoice(sign.id, sign.name);
-      getPreloadedAudio(sign.id, sign.name); // warm browser cache
-    } else if (getVoiceConfig().apiKey) {
-      const already = await hasCachedClip(sign.id, sign.name);
-      if (already) return;
-      await ensureClip(sign.id, sign.name);
+      const ok = await loadClipIntoMemory(sign.id, sign.name);
+      updateVoice();
+      return ok;
     }
-    updateVoice();
+    if (getVoiceConfig().apiKey) {
+      const already = await hasCachedClip(sign.id, sign.name);
+      if (!already) await ensureClip(sign.id, sign.name);
+      updateVoice();
+      return true;
+    }
   } catch (e) {
-    toast('تعذّر حفظ الصوت: ' + (e.message || e));
+    console.warn('voice cache', e);
   }
+  return false;
+}
+
+async function warmAllVoices() {
+  if (!flaskMode || !signs.length) return;
+  try {
+    // Fill any missing mp3s on the server once
+    await api.warmupVoices();
+  } catch (e) {
+    console.warn('warmup', e);
+  }
+  await Promise.allSettled(
+    signs.map((s) => loadClipIntoMemory(s.id, s.name)),
+  );
+  const n = readyAudio.size;
+  const st = $('voice-status');
+  if (st) st.textContent = n
+    ? `أصوات جاهزة في الذاكرة: ${n} · النطق فوري بدون ElevenLabs`
+    : 'لا توجد مقاطع صوت بعد — تُحفظ عند إضافة/تدريب الكلمة';
+  render();
 }
 
 $('speak').onclick = () => current && speak(current.id, current.name);
@@ -562,8 +694,7 @@ function recognized(match) {
   $('history').prepend(row);
   while ($('history').children.length > 30) $('history').lastChild.remove();
 
-  // Prefetch + speak (always attempt voice on recognition)
-  if (expectedOk) cacheVoiceForSign(signs[match.id]);
+  // Instant speak from memory — never wait for ElevenLabs on the live path
   if ($('auto-speak').checked) {
     speak(match.id, match.name).catch(() => speakBrowser(match.name));
   } else {
@@ -999,13 +1130,15 @@ function loop(now) {
               }
 
               if (match) {
-                if (latched === match.id) return;
-                // Instant UI + speak (no long hold)
+                const nowMs = performance.now();
+                // Same word: short cooldown. Different word: fire immediately.
+                if (latched === match.id && (nowMs - latchedAt) < SAME_SIGN_COOLDOWN_MS) return;
                 $('result').textContent = match.name;
                 $('score').textContent = match.similarity + '%';
                 $('meter-fill').style.width = match.similarity + '%';
                 recognized(match);
                 latched = match.id;
+                latchedAt = nowMs;
               }
             };
 
@@ -1218,7 +1351,10 @@ $('record').onclick = async () => {
     await wait(1100);
 
     if (ready) {
-      cacheVoiceForSign(signs[id]);
+      // Ensure mp3 exists + in memory before live testing
+      cacheVoiceForSign(signs[id]).then((ok) => {
+        if (ok) toast(`صوت «${word}» جاهز في الذاكرة`);
+      });
       setVerifyBanner('ok', `✓ «${word}» جاهزة — نفّذ الإشارة الآن`);
       startVerify(id);
     } else {

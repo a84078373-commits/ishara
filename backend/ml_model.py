@@ -173,7 +173,7 @@ def _classes_of(model) -> list[int]:
     return []
 
 
-def predict(frames, signs: list[dict], min_proba: float = 0.40) -> dict | None:
+def predict(frames, signs: list[dict], min_proba: float = 0.48) -> dict | None:
     bundle = load_model()
     if not bundle or not bundle.get('model'):
         return None
@@ -217,9 +217,11 @@ def predict(frames, signs: list[dict], min_proba: float = 0.40) -> dict | None:
         'n': best['n'],
     }
 
-    # Single trained word: accept almost any presence of a hand gesture
-    need = 0.25 if len(ranked) == 1 else min_proba
-    if best['proba'] >= need and (len(ranked) == 1 or margin >= 0.06):
+    # One class: sensitive. Multiple classes: require clearer margin for accuracy.
+    n_classes = len(ranked)
+    need = 0.28 if n_classes == 1 else min_proba
+    need_margin = 0.0 if n_classes == 1 else (0.10 if n_classes <= 3 else 0.08)
+    if best['proba'] >= need and margin >= need_margin:
         return {
             'match': {
                 'id': best['id'],

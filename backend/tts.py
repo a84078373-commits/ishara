@@ -66,3 +66,37 @@ def delete_clip(sign_id: int, text: str) -> None:
     path = _safe_name(sign_id, text)
     if path.exists():
         path.unlink()
+
+
+def delete_clips_for_sign(sign_id: int) -> None:
+    if not AUDIO_DIR.exists():
+        return
+    for path in AUDIO_DIR.glob(f'{sign_id}_*.mp3'):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def rekey_clips(old_id: int, new_id: int) -> None:
+    """Rename cached clips when a sign id changes after delete/reindex."""
+    if old_id == new_id or not AUDIO_DIR.exists():
+        return
+    for old in list(AUDIO_DIR.glob(f'{old_id}_*.mp3')):
+        suffix = old.name.split('_', 1)[1]
+        new = AUDIO_DIR / f'{new_id}_{suffix}'
+        try:
+            if new.exists():
+                new.unlink()
+            old.rename(new)
+        except OSError:
+            pass
+
+
+def missing_for_signs(signs: list[dict]) -> list[dict]:
+    missing = []
+    for s in signs:
+        name = (s.get('name') or '').strip()
+        if name and not has_clip(int(s['id']), name):
+            missing.append({'id': int(s['id']), 'name': name})
+    return missing

@@ -865,12 +865,35 @@ footer b { padding: 0 6px; color: #8f9aa5; }
   word-break: break-word;
 }
 .sign-card p { font-size: 12px; color: var(--muted); }
-.sign-card button {
+.sign-actions {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  margin-top: 14px;
+}
+.sign-actions button {
   font-size: 12px;
   width: 100%;
-  margin-top: 14px;
+  margin-top: 0;
   color: var(--accent);
   font-weight: 700;
+  min-height: 44px;
+}
+.sign-actions .danger-btn {
+  color: var(--danger);
+  min-width: 72px;
+  padding: 8px 12px;
+  border-color: rgba(255, 143, 143, 0.35);
+  background: rgba(255, 143, 143, 0.08);
+}
+.danger-solid {
+  width: 100%;
+  margin-top: 8px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 143, 143, 0.4);
+  background: rgba(255, 143, 143, 0.1);
+  color: var(--danger);
+  font-weight: 800;
 }
 .sign-card.ready {
   border-color: rgba(212, 245, 66, 0.35);
@@ -1303,7 +1326,8 @@ dialog p, dialog li {
 
   .sign-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .sign-card { padding: 14px; }
-  .sign-card button { min-height: 44px; }
+  .sign-actions { grid-template-columns: 1fr; }
+  .sign-actions .danger-btn { width: 100%; }
 
   /* Bottom sheet dialogs on phones */
   dialog {

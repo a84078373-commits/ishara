@@ -109,14 +109,26 @@ def rename_sign(sign_id: int, name: str) -> dict:
     name = (name or '').strip()[:40]
     if not name:
         raise ValueError('الاسم فارغ')
-    signs = load_signs()
+    from . import tts
+
     with _lock:
+        if not SIGNS_PATH.exists():
+            signs = _default_signs()
+        else:
+            signs = json.loads(SIGNS_PATH.read_text(encoding='utf-8')).get('signs') or _default_signs()
         if sign_id < 0 or sign_id >= len(signs):
             raise ValueError('إشارة غير موجودة')
+        old_name = signs[sign_id]['name']
         signs[sign_id]['name'] = name
         signs[sign_id]['verified'] = False
         _save_unlocked(signs)
-        return list_public(signs)[sign_id]
+        public = list_public(signs)[sign_id]
+    if old_name != name:
+        try:
+            tts.delete_clip(sign_id, old_name)
+        except Exception:
+            pass
+    return public
 
 
 def clear_samples(sign_id: int) -> dict:
@@ -130,6 +142,34 @@ def clear_samples(sign_id: int) -> dict:
         snapshot = json.loads(json.dumps(signs))
         _save_unlocked(signs)
         public = list_public(signs)[sign_id]
+    _retrain(snapshot)
+    return public
+
+
+def delete_sign(sign_id: int) -> list[dict]:
+    """Remove a word entirely, reindex ids, and retrain."""
+    from . import tts
+
+    with _lock:
+        if not SIGNS_PATH.exists():
+            signs = _default_signs()
+        else:
+            signs = json.loads(SIGNS_PATH.read_text(encoding='utf-8')).get('signs') or _default_signs()
+        if sign_id < 0 or sign_id >= len(signs):
+            raise ValueError('إشارة غير موجودة')
+        if len(signs) <= 1:
+            raise ValueError('يجب الإبقاء على كلمة واحدة على الأقل')
+
+        tts.delete_clips_for_sign(sign_id)
+        signs.pop(sign_id)
+        for i, s in enumerate(signs):
+            old_id = int(s.get('id', i))
+            if old_id != i:
+                tts.rekey_clips(old_id, i)
+            s['id'] = i
+        snapshot = json.loads(json.dumps(signs))
+        _save_unlocked(signs)
+        public = list_public(signs)
     _retrain(snapshot)
     return public
 

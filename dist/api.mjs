@@ -38,6 +38,10 @@ export async function clearSamples(id) {
   return req(`/api/signs/${id}/samples`, { method: 'DELETE' });
 }
 
+export async function deleteSign(id) {
+  return req(`/api/signs/${id}`, { method: 'DELETE' });
+}
+
 export async function uploadSample(id, frames) {
   return req(`/api/signs/${id}/samples`, {
     method: 'POST',
@@ -56,15 +60,28 @@ export async function recognize(frames) {
   });
 }
 
-export async function ensureVoice(id, text) {
+export async function ensureVoice(id, text, { force = false } = {}) {
   return req(`/api/tts/${id}`, {
     method: 'POST',
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, force }),
   });
+}
+
+export async function warmupVoices() {
+  return req('/api/tts/warmup', { method: 'POST', body: '{}' });
 }
 
 export function audioUrl(id, text) {
   return `/api/audio/${id}?t=${encodeURIComponent(text)}&v=1`;
+}
+
+export async function audioExists(id, text) {
+  try {
+    const res = await fetch(audioUrl(id, text), { method: 'HEAD' });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 export async function exportTraining() {
