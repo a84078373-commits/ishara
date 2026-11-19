@@ -117,8 +117,10 @@ function render() {
     document.createTextNode(String(ready).padStart(2, '0') + ' '),
     Object.assign(document.createElement('small'), { textContent: `/ ${signs.length}` }),
   );
-  const libBadge = document.querySelector('.nav[data-view="library"] span');
-  if (libBadge) libBadge.textContent = String(signs.length);
+  const count = String(signs.length);
+  document.querySelectorAll('#lib-count-desktop, #lib-count-mobile, .nav[data-view="library"] span').forEach((el) => {
+    el.textContent = count;
+  });
   if (!current && !verifyTarget && !recording) updateLiveTrainHint();
 
   $('signs').replaceChildren(...signs.map((s) => {

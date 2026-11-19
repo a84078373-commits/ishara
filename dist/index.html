@@ -19,30 +19,32 @@
       <span class="brand-mark">ع</span>
       <span class="brand-text">إشارة<small>ISHARA VISION</small></span>
     </a>
-    <div class="private"><i></i> معالجة آمنة</div>
+    <div class="header-tools">
+      <div class="private"><i></i> معالجة آمنة</div>
+      <button id="help" class="ghost-btn" type="button" title="كيف أبدأ؟">؟</button>
+      <button id="voice-settings" class="ghost-btn" type="button" title="الصوت">♪</button>
+    </div>
   </div>
-  <nav class="top-nav" aria-label="التنقل الرئيسي">
+  <nav class="top-nav desktop-nav" aria-label="التنقل الرئيسي">
     <button class="nav active" data-view="live">مباشر</button>
-    <button class="nav" data-view="library">المكتبة <span>20</span></button>
-    <button id="help">كيف أبدأ؟</button>
-    <button id="voice-settings">الصوت</button>
+    <button class="nav" data-view="library">المكتبة <span id="lib-count-desktop">20</span></button>
   </nav>
 </header>
 
 <main>
   <div class="hero">
-    <div>
+    <div class="hero-copy">
       <div class="eyebrow">نموذج قابل للتدريب <span>/</span> Flask + ML</div>
       <h1>علّمه كلماتك.<br><em>يفهم إشارتك.</em></h1>
       <p class="hero-lead">نموذج تعلّم حقيقي على السيرفر: تضيف الكلمات، تسجّل الأمثلة، ويُعاد تدريبه تلقائيًا ثم يتعرّف وينطق.</p>
     </div>
     <div class="hero-side">
       <div class="lang-pill">
-        <span>🇸🇦</span>
+        <span class="pill-ico" aria-hidden="true">🇸🇦</span>
         <div>لغة الإشارة السعودية<small>تتعلّم من أمثلتك أنت</small></div>
       </div>
       <div class="accuracy-pill">
-        <span>21×2</span>
+        <span class="pill-ico">21×2</span>
         <div>مفاصل دقيقة<small>شكل اليد + سرعة الحركة</small></div>
       </div>
     </div>
@@ -166,6 +168,18 @@
     <span>تتبع مفاصل + حركة <b>·</b> صوت عربي <b>·</b> خصوصية أولًا</span>
   </footer>
 </main>
+
+<nav class="mobile-dock" aria-label="تنقل الجوال">
+  <button class="nav dock-btn active" data-view="live" type="button">
+    <span class="dock-ico" aria-hidden="true">◎</span>
+    <span>مباشر</span>
+  </button>
+  <button class="nav dock-btn" data-view="library" type="button">
+    <span class="dock-ico" aria-hidden="true">☰</span>
+    <span>المكتبة</span>
+    <em id="lib-count-mobile">20</em>
+  </button>
+</nav>
 
 <dialog id="trainer">
   <div class="dialog-top">
