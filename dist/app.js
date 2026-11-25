@@ -494,6 +494,22 @@ function stopSpeaking() {
   try { speechSynthesis?.cancel(); } catch { /* ignore */ }
 }
 
+/** Call after a user gesture (e.g. start camera) so later audio.play() is allowed. */
+function unlockSpeechAudio() {
+  try {
+    // Tiny silent wav — unlocks autoplay policy after camera button click
+    const silent = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
+    silent.volume = 0;
+    silent.play().catch(() => {});
+  } catch { /* ignore */ }
+  for (const el of readyAudio.values()) {
+    try {
+      el.muted = true;
+      el.play().then(() => { el.pause(); el.currentTime = 0; el.muted = false; }).catch(() => { el.muted = false; });
+    } catch { /* ignore */ }
+  }
+}
+
 /** Load a cached mp3 into memory. Never generates TTS. Returns true if ready. */
 async function loadClipIntoMemory(signId, text) {
   const name = String(text || '').trim();
@@ -521,38 +537,82 @@ async function loadClipIntoMemory(signId, text) {
 }
 
 /**
- * Live speak: ONLY from in-memory Audio. Zero ElevenLabs / network wait.
- * Missing clip → browser TTS now; generate+warm in background for next time.
+ * Live speak priority:
+ * 1) in-memory mp3  2) server-cached /api/audio file  3) generate once then play
+ * 4) browser TTS last resort
+ * Never skip the saved ElevenLabs file in favor of silent browser voices.
  */
 function speak(signId, text) {
   const name = String(text || '').trim();
+  if (!name) return Promise.resolve(false);
   stopSpeaking();
+
+  const playEl = (audio) => {
+    try {
+      audio.currentTime = 0;
+      serverAudio = audio;
+      const p = audio.play();
+      updateVoice();
+      if (p && typeof p.catch === 'function') {
+        return p.then(() => true).catch((err) => {
+          console.warn('audio.play failed', err);
+          return false;
+        });
+      }
+      return Promise.resolve(true);
+    } catch (e) {
+      console.warn('playEl', e);
+      return Promise.resolve(false);
+    }
+  };
 
   const cached = readyAudio.get(signId);
   if (cached && cached._isharaText === name) {
-    try {
-      cached.currentTime = 0;
-      serverAudio = cached;
-      const p = cached.play();
-      if (p && typeof p.catch === 'function') p.catch(() => speakBrowser(name));
-      updateVoice();
-      return Promise.resolve(true);
-    } catch {
-      /* fall through */
-    }
+    return playEl(cached).then((ok) => {
+      if (ok) return true;
+      return speakFallback(signId, name);
+    });
   }
 
-  // Do not await fetch/ensure here — keeps gesture→speech instant
-  speakBrowser(name);
-  (async () => {
-    if (flaskMode) {
-      const loaded = await loadClipIntoMemory(signId, name);
-      if (!loaded) await cacheVoiceForSign({ id: signId, name });
-    } else {
-      await cacheVoiceForSign({ id: signId, name });
+  if (flaskMode) {
+    // Play the disk-cached mp3 immediately (already generated at train time)
+    const audio = new Audio(api.audioUrl(signId, name));
+    audio.preload = 'auto';
+    audio._isharaText = name;
+    readyAudio.set(signId, audio);
+    return playEl(audio).then(async (ok) => {
+      if (ok) return true;
+      // Missing file → generate once, reload, play
+      try {
+        await cacheVoiceForSign({ id: signId, name });
+        const warmed = readyAudio.get(signId);
+        if (warmed) {
+          const again = await playEl(warmed);
+          if (again) return true;
+        }
+      } catch (e) {
+        console.warn('ensure voice', e);
+      }
+      return speakFallback(signId, name);
+    });
+  }
+
+  return speakFallback(signId, name);
+}
+
+async function speakFallback(signId, name) {
+  try {
+    if (getVoiceConfig().apiKey) {
+      const { blob } = await ensureClip(signId, name);
+      await playClip(blob);
+      updateVoice();
+      return true;
     }
-  })().catch(() => {});
-  return Promise.resolve(false);
+  } catch (e) {
+    console.warn('local clip', e);
+  }
+  speakBrowser(name);
+  return false;
 }
 
 /** Generate+cache once (add/train/rename/boot) then load into memory. */
@@ -842,6 +902,10 @@ async function start() {
     $('camera-state').textContent = 'الكاميرا مباشرة';
     video.classList.toggle('mirror', mirror);
     canvas.classList.toggle('mirror', mirror);
+    // Unlock autoplay for cached speech (browser blocks sound until a gesture)
+    unlockSpeechAudio();
+    // Ensure trained-word clips are in memory for instant speak
+    warmAllVoices().catch(() => {});
     raf = requestAnimationFrame(loop);
   } catch (e) {
     stop();
