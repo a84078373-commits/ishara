@@ -24,8 +24,21 @@ def _err(exc: Exception, code: int = 400):
     return jsonify({'ok': False, 'error': str(exc)}), code
 
 
+def _cache_voice_now(sign_id: int, text: str) -> dict:
+    """Generate+save mp3 at train time so live/test speak is instant."""
+    try:
+        path, from_cache = tts.ensure_clip(sign_id, text)
+        return {
+            'voiceCached': True,
+            'fromCache': from_cache,
+            'bytes': path.stat().st_size if path.exists() else 0,
+        }
+    except Exception as e:
+        return {'voiceCached': False, 'voiceError': str(e)}
+
+
 def _cache_voice_async(sign_id: int, text: str) -> None:
-    """Generate ElevenLabs clip once in background — never during live speak."""
+    """Background warmup only — never used on the live speak path."""
     def job():
         try:
             tts.ensure_clip(sign_id, text)
@@ -80,10 +93,9 @@ def create_sign():
     try:
         name = (request.json or {}).get('name', '')
         sign = storage.add_sign(name)
-        # Save voice file as soon as the word is added (once)
-        _cache_voice_async(sign['id'], sign['name'])
-        sign['voiceCached'] = False
-        return jsonify({'ok': True, 'sign': sign})
+        voice = _cache_voice_now(sign['id'], sign['name'])
+        sign['voiceCached'] = bool(voice.get('voiceCached'))
+        return jsonify({'ok': True, 'sign': sign, **voice})
     except Exception as e:
         return _err(e)
 
@@ -93,9 +105,9 @@ def patch_sign(sign_id: int):
     try:
         name = (request.json or {}).get('name', '')
         sign = storage.rename_sign(sign_id, name)
-        _cache_voice_async(sign_id, sign['name'])
-        sign['voiceCached'] = tts.has_clip(sign_id, sign['name'])
-        return jsonify({'ok': True, 'sign': sign})
+        voice = _cache_voice_now(sign_id, sign['name'])
+        sign['voiceCached'] = bool(voice.get('voiceCached'))
+        return jsonify({'ok': True, 'sign': sign, **voice})
     except Exception as e:
         return _err(e)
 
@@ -124,11 +136,9 @@ def post_sample(sign_id: int):
     try:
         frames = (request.json or {}).get('frames') or []
         result = storage.add_sample(sign_id, frames)
-        # Prefetch voice once when ready — never block recognition path
-        if result['ready']:
-            _cache_voice_async(sign_id, result['sign']['name'])
-            result['voiceQueued'] = True
-            result['voiceCached'] = tts.has_clip(sign_id, result['sign']['name'])
+        # Generate+save voice during training so test/live pulls a ready file
+        voice = _cache_voice_now(sign_id, result['sign']['name'])
+        result.update(voice)
         return jsonify({'ok': True, **result})
     except Exception as e:
         return _err(e)
@@ -159,7 +169,14 @@ def recognize():
     DTW is fallback only when no trained model exists.
     """
     try:
-        frames = (request.json or {}).get('frames') or []
+        body = request.json or {}
+        frames = body.get('frames') or []
+        expected_id = body.get('expectedId')
+        if expected_id is not None:
+            try:
+                expected_id = int(expected_id)
+            except (TypeError, ValueError):
+                expected_id = None
         if len(frames) < 5:
             return jsonify({'ok': True, 'match': None, 'peek': None, 'reason': 'short'})
         frames = _downsample_frames(frames, 48)
@@ -167,7 +184,7 @@ def recognize():
         model = ml_model.status()
 
         if model.get('ready'):
-            ml = ml_model.predict(frames, signs) or {}
+            ml = ml_model.predict(frames, signs, expected_id=expected_id) or {}
             if not ml:
                 return jsonify({'ok': True, 'match': None, 'peek': None, 'reason': 'empty', 'engine': 'ml'})
             ml.setdefault('engine', 'ml')

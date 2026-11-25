@@ -36,15 +36,16 @@ let verifyFailAt = 0;
 let recognizing = false;
 let lastRecognizeAt = 0;
 const SAME_SIGN_COOLDOWN_MS = 650;
-/** Live: gesture ends → recognize+speak instantly (minimal settle). */
+/** Live: end of gesture → recognize+speak. Adaptive settle keeps multi-part intact. */
 const LIVE_BUFFER_MS = 4200;
-const GESTURE_SETTLE_MS = 70;
-const MIN_GESTURE_MS = 220;
+const GESTURE_SETTLE_FAST_MS = 70;
+const GESTURE_SETTLE_PART_MS = 200;
+const MIN_GESTURE_MS = 240;
 const MAX_GESTURE_MS = 4800;
 const MOTION_THRESH = 0.085;
 const MIN_MOTION_FRAMES = 3;
 const MIN_MOTION_SUM = 0.40;
-const MIN_MATCH_SCORE = 70;
+const MIN_MATCH_SCORE = 68;
 let gestureArmed = false;
 let gestureStartAt = 0;
 let lastMotionAt = 0;
@@ -267,7 +268,19 @@ function setVerifyBanner(mode, text) {
   el.textContent = text;
 }
 
-function startVerify(id) {
+async function startVerify(id) {
+  const sign = signs[id];
+  if (!sign || sign.samples.length < MIN_SAMPLES) {
+    toast(`درّب «${sign?.name || 'الكلمة'}» بـ ${MIN_SAMPLES} مثال أولًا ثم اختبر`);
+    openTrainer(id);
+    return;
+  }
+  // Pull saved train-time mp3 into memory BEFORE the test — speak is then instant
+  await loadClipIntoMemory(id, sign.name);
+  if (!readyAudio.has(id)) {
+    await cacheVoiceForSign(sign);
+  }
+
   verifyTarget = id;
   verifyFailAt = 0;
   buffer = [];
@@ -277,16 +290,20 @@ function startVerify(id) {
   motionFrames = 0;
   motionSum = 0;
   lastFeatFrame = null;
+  lastRecognizeAt = 0;
   $('trainer').close();
   view('live');
-  const name = signs[id].name;
-  setVerifyBanner('waiting', `⏳ اختبار: نفّذ «${name}» مرة واحدة طبيعيًا`);
-  $('result').textContent = 'اختبار التعرّف…';
-  $('result-note').textContent = `تتبّع المفاصل نشط — نفّذ «${name}» كما درّبتها مرة واحدة`;
-  $('result-ring').textContent = '?';
+  const name = sign.name;
+  const voiceReady = readyAudio.has(id);
+  setVerifyBanner('waiting', `نفّذ «${name}» الآن — التعرّف فوري`);
+  $('result').textContent = name;
+  $('result-note').textContent = voiceReady
+    ? `الصوت جاهز · نفّذ الإشارة`
+    : `نفّذ الإشارة كما درّبتها`;
+  $('result-ring').textContent = '◎';
   $('score').textContent = '—';
   $('meter-fill').style.width = '0%';
-  toast(`اختبار «${name}»: إشارة واحدة متصلة — التعرّف تلقائي`);
+  toast(`اختبار «${name}» — الإشارة ثم الصوت فورًا`);
 }
 
 function showSuccess(match) {
@@ -298,14 +315,14 @@ function showSuccess(match) {
 }
 
 $('success-ok').onclick = () => { $('success-flash').hidden = true; };
-$('test-sign').onclick = () => {
+$('test-sign').onclick = async () => {
   if (!running) {
     $('trainer').close();
     view('live');
     toast('شغّل الكاميرا أولًا ثم اضغط اختبار التعرّف.');
     return;
   }
-  startVerify(selected);
+  await startVerify(selected);
 };
 
 $('close-trainer').onclick = () => { if (!recording) $('trainer').close(); };
@@ -575,32 +592,18 @@ function speak(signId, text) {
     }
   };
 
+  // Hot path: only in-memory clip saved at train time (zero network)
   const cached = readyAudio.get(signId);
   if (cached && cached._isharaText === name) {
-    return playEl(cached).then((ok) => {
-      if (ok) return true;
-      return speakFallback(signId, name);
-    });
+    return playEl(cached);
   }
 
   if (flaskMode) {
-    // Play the disk-cached mp3 immediately (already generated at train time)
-    const audio = new Audio(api.audioUrl(signId, name));
-    audio.preload = 'auto';
-    audio._isharaText = name;
-    readyAudio.set(signId, audio);
-    return playEl(audio).then(async (ok) => {
-      if (ok) return true;
-      // Missing file → generate once, reload, play
-      try {
-        await cacheVoiceForSign({ id: signId, name });
-        const warmed = readyAudio.get(signId);
-        if (warmed) {
-          const again = await playEl(warmed);
-          if (again) return true;
-        }
-      } catch (e) {
-        console.warn('ensure voice', e);
+    // Rare miss: pull disk cache once, keep in memory, play
+    return loadClipIntoMemory(signId, name).then((ok) => {
+      if (ok) {
+        const el = readyAudio.get(signId);
+        if (el) return playEl(el);
       }
       return speakFallback(signId, name);
     });
@@ -1258,10 +1261,11 @@ function loop(now) {
             }
 
             const strongEnough = motionFrames >= MIN_MOTION_FRAMES && motionSum >= MIN_MOTION_SUM;
-            // Fire the moment motion pauses — no perceptible wait
+            // Early in a gesture wait a bit longer so part-2 of multi-part isn't cut
+            const settleNeed = gestureMs < 900 ? GESTURE_SETTLE_PART_MS : GESTURE_SETTLE_FAST_MS;
             const settled = gestureArmed
               && strongEnough
-              && (now - lastMotionAt) >= GESTURE_SETTLE_MS
+              && (now - lastMotionAt) >= settleNeed
               && gestureMs >= MIN_GESTURE_MS
               && buffer.length >= 6;
 
@@ -1271,6 +1275,7 @@ function loop(now) {
               const frames = (clip.length >= 6 ? clip : buffer).map((x) => x.f);
               const step = Math.max(1, Math.ceil(frames.length / 48));
               const payload = frames.filter((_, i) => i % step === 0);
+              const expectedId = verifyTarget;
 
               gestureArmed = false;
               motionFrames = 0;
@@ -1291,7 +1296,9 @@ function loop(now) {
                     $('result').textContent = peek.name;
                     $('score').textContent = peek.similarity + '%';
                     $('meter-fill').style.width = Math.max(8, peek.similarity) + '%';
-                    $('result-note').textContent = `قريب من «${peek.name}» — أعد الإشارة أوضح`;
+                    $('result-note').textContent = verifyTarget != null
+                      ? `لم يتأكد بعد (${peek.similarity}%) — أعد «${signs[verifyTarget]?.name || ''}»`
+                      : `قريب من «${peek.name}» — أعد الإشارة أوضح`;
                     $('result-ring').textContent = '…';
                   } else if (!verifyTarget) {
                     $('result-note').textContent = 'بانتظار إشارتك';
@@ -1300,7 +1307,10 @@ function loop(now) {
                   return;
                 }
 
-                if ((match.similarity || 0) < MIN_MATCH_SCORE) {
+                const minScore = (verifyTarget != null && match.id === verifyTarget)
+                  ? 55
+                  : MIN_MATCH_SCORE;
+                if ((match.similarity || 0) < minScore) {
                   $('result-note').textContent = `غير مؤكد (${match.similarity}%) — أعد الإشارة`;
                   $('result-ring').textContent = '…';
                   $('score').textContent = match.similarity + '%';
@@ -1322,7 +1332,7 @@ function loop(now) {
 
               if (flaskMode) {
                 recognizing = true;
-                api.recognize(payload).then((res) => {
+                api.recognize(payload, { expectedId }).then((res) => {
                   recognizing = false;
                   applyResult(res.match, res.peek, res.reason);
                 }).catch((err) => {
@@ -1564,20 +1574,21 @@ $('record').onclick = async () => {
 
     toast(
       ready
-        ? `✓ «${word}» جاهزة. نفّذها مرة واحدة طبيعيًا للتعرّف.`
+        ? `✓ «${word}» جاهزة. جاري تجهيز الصوت…`
         : `✓ مثال ${count} محفوظ. بقي ${MIN_SAMPLES - count}.`,
     );
 
-    await wait(1100);
-
     if (ready) {
-      // Ensure mp3 exists + in memory before live testing
-      cacheVoiceForSign(signs[id]).then((ok) => {
-        if (ok) toast(`صوت «${word}» جاهز في الذاكرة`);
-      });
+      // Voice was generated on the server during upload — pull into memory now
+      const voiceOk = await cacheVoiceForSign(signs[id]);
+      if (voiceOk) toast(`صوت «${word}» محفوظ وجاهز`);
+      else if (flaskMode) toast(`حُفظت الإشارة؛ الصوت يُحمّل لاحقًا`);
       setVerifyBanner('ok', `✓ «${word}» جاهزة — نفّذ الإشارة الآن`);
-      startVerify(id);
+      await startVerify(id);
     } else {
+      // Still generate voice on first sample so it's ready when training completes
+      cacheVoiceForSign(signs[id]).catch(() => {});
+      await wait(400);
       openTrainer(id);
     }
   } catch (e) {

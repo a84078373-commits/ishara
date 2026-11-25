@@ -330,7 +330,12 @@ def _score_window(model, frames, ready: dict, classes: list[int]) -> list[dict]:
     return ranked
 
 
-def predict(frames, signs: list[dict], min_proba: float = 0.68) -> dict | None:
+def predict(
+    frames,
+    signs: list[dict],
+    min_proba: float = 0.68,
+    expected_id: int | None = None,
+) -> dict | None:
     """Single-pass ExtraTrees — optimized for instant live recognition."""
     bundle = load_model()
     if not bundle or not bundle.get('model'):
@@ -386,6 +391,32 @@ def predict(frames, signs: list[dict], min_proba: float = 0.68) -> dict | None:
     else:
         need = 0.62 if peaks >= 2 else max(min_proba - 0.04, 0.66)
         need_margin = 0.08 if peaks >= 2 else 0.12
+
+    # Verify mode: accept the expected word with a softer bar (user just trained it)
+    if expected_id is not None and int(expected_id) in ready:
+        for row in ranked:
+            if int(row['id']) != int(expected_id):
+                continue
+            soft_need = max(0.48, need - 0.18)
+            if row['proba'] >= soft_need:
+                return {
+                    'match': {
+                        'id': row['id'],
+                        'name': row['name'],
+                        'similarity': max(int(row['similarity']), 70),
+                        'd': float(1.0 - row['proba']),
+                        'n': row['n'],
+                        'margin': round(float(row['proba'] - (second['proba'] if second else 0.0)), 4),
+                        'engine': 'ml-verify',
+                        'window': 'full',
+                        'peaks': peaks,
+                    },
+                    'peek': peek,
+                    'ranked': ranked[:3],
+                    'engine': 'ml-verify',
+                    'motion': gate,
+                }
+            break
 
     if best['proba'] >= need and margin >= need_margin:
         return {

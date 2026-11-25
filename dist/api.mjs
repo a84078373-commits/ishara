@@ -53,10 +53,12 @@ export async function markVerified(id) {
   return req(`/api/signs/${id}/verify`, { method: 'POST', body: '{}' });
 }
 
-export async function recognize(frames) {
+export async function recognize(frames, { expectedId } = {}) {
+  const body = { frames };
+  if (expectedId != null) body.expectedId = expectedId;
   return req('/api/recognize', {
     method: 'POST',
-    body: JSON.stringify({ frames }),
+    body: JSON.stringify(body),
   });
 }
 
