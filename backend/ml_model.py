@@ -252,10 +252,25 @@ def _score_window(model, frames, ready: dict, classes: list[int]) -> list[dict]:
     return ranked
 
 
-def predict(frames, signs: list[dict], min_proba: float = 0.42) -> dict | None:
+def is_intentional_gesture(frames, min_mean: float = 0.028, min_peaks: int = 1, min_max: float = 0.07) -> dict:
+    """Reject idle standing / tiny jitter — only clear purposeful motion."""
+    arr = np.asarray(frames, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape[0] < 8:
+        return {'ok': False, 'reason': 'short', 'mean': 0.0, 'peaks': 0, 'max': 0.0}
+    motion = motion_profile(trim_idle(arr))
+    mean = float(motion.mean()) if motion.size else 0.0
+    mx = float(motion.max()) if motion.size else 0.0
+    peaks = int(count_motion_peaks(motion, thresh=0.04))
+    ok = mean >= min_mean and mx >= min_max and peaks >= min_peaks
+    return {'ok': ok, 'reason': 'ok' if ok else 'idle', 'mean': mean, 'peaks': peaks, 'max': mx}
+
+
+def predict(frames, signs: list[dict], min_proba: float = 0.72) -> dict | None:
     """
-    Multi-window predict: prefers the FULL gesture window so short prefixes
-    (e.g. first move of «كيف حالك») don't steal the match from a shorter word.
+    Strict multi-window predict:
+    - Reject idle / standing-still clips
+    - Prefer full gesture window
+    - High confidence + margin required before match
     """
     bundle = load_model()
     if not bundle or not bundle.get('model'):
@@ -271,20 +286,29 @@ def predict(frames, signs: list[dict], min_proba: float = 0.42) -> dict | None:
         return None
 
     arr = np.asarray(frames, dtype=np.float64)
-    if arr.ndim != 2 or arr.shape[0] < 4:
+    if arr.ndim != 2 or arr.shape[0] < 8:
         return None
 
+    gate = is_intentional_gesture(arr)
+    if not gate['ok']:
+        return {
+            'match': None,
+            'peek': None,
+            'ranked': [],
+            'engine': 'ml',
+            'reason': 'idle',
+            'motion': gate,
+        }
+
     n = arr.shape[0]
-    # Build candidate windows: full multi-part first, then shorter tails
     windows: list[tuple[str, float, np.ndarray]] = [
         ('full', 1.20, arr),
     ]
     if n >= 16:
         windows.append(('body', 1.05, arr[max(0, n // 8):]))
     if n >= 24:
-        windows.append(('tail', 0.82, arr[-max(10, n // 3):]))
+        windows.append(('tail', 0.75, arr[-max(10, n // 3):]))
 
-    # Aggregate weighted votes across windows
     scores: dict[int, float] = {}
     best_by_id: dict[int, dict] = {}
     for kind, weight, win in windows:
@@ -304,7 +328,6 @@ def predict(frames, signs: list[dict], min_proba: float = 0.42) -> dict | None:
     second = ordered[1] if len(ordered) > 1 else None
     margin = best['weighted'] - (second['weighted'] if second else 0.0)
 
-    # Raw full-window ranking for peek UI
     full_ranked = _score_window(model, arr, ready, classes) or ordered
     peek_src = full_ranked[0]
     peek = {
@@ -316,27 +339,39 @@ def predict(frames, signs: list[dict], min_proba: float = 0.42) -> dict | None:
     }
 
     n_classes = len(ready)
-    need = 0.26 if n_classes == 1 else min_proba
-    need_margin = 0.0 if n_classes == 1 else (0.08 if n_classes <= 3 else 0.07)
+    # Single-class models are biased — demand near-certainty + clear motion
+    if n_classes == 1:
+        need = 0.88
+        need_margin = 0.0
+    elif n_classes <= 3:
+        need = max(min_proba, 0.75)
+        need_margin = 0.18
+    else:
+        need = max(min_proba, 0.70)
+        need_margin = 0.14
 
-    # Reject short-tail-only wins when full window disagrees (anti prefix-confusion)
+    # Never accept tail-only as decisive
     if best.get('window') == 'tail' and full_ranked:
         full_best = full_ranked[0]
-        if full_best['id'] != best['id'] and full_best['proba'] >= 0.28:
-            best = {
-                **full_best,
-                'window': 'full',
-                'weighted': full_best['proba'] * 1.20,
-            }
-            second = full_ranked[1] if len(full_ranked) > 1 else None
-            margin = best['proba'] - (second['proba'] if second else 0.0)
+        best = {
+            **full_best,
+            'window': 'full',
+            'weighted': full_best['proba'] * 1.20,
+        }
+        second = full_ranked[1] if len(full_ranked) > 1 else None
+        margin = best['proba'] - (second['proba'] if second else 0.0)
+
+    # Full window must also be confident
+    if full_ranked and full_ranked[0]['id'] == best['id']:
+        if full_ranked[0]['proba'] < need - 0.05:
+            return {'match': None, 'peek': peek, 'ranked': full_ranked[:3], 'engine': 'ml', 'reason': 'low_full'}
 
     if best['proba'] >= need and margin >= need_margin:
         return {
             'match': {
                 'id': best['id'],
                 'name': best['name'],
-                'similarity': max(int(best['similarity']), 55),
+                'similarity': max(int(best['similarity']), 70),
                 'd': float(1.0 - best['proba']),
                 'n': best['n'],
                 'margin': round(float(margin), 4),
@@ -346,6 +381,7 @@ def predict(frames, signs: list[dict], min_proba: float = 0.42) -> dict | None:
             'peek': peek,
             'ranked': full_ranked[:3],
             'engine': 'ml',
+            'motion': gate,
         }
 
-    return {'match': None, 'peek': peek, 'ranked': full_ranked[:3], 'engine': 'ml'}
+    return {'match': None, 'peek': peek, 'ranked': full_ranked[:3], 'engine': 'ml', 'reason': 'low_conf'}

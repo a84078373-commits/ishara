@@ -128,10 +128,18 @@ def sign_score(windows: list[np.ndarray], samples: list) -> float:
     return best
 
 
-def classify(raw_frames: list, signs: list, threshold: float = 0.24) -> dict | None:
+def classify(raw_frames: list, signs: list, threshold: float = 0.18) -> dict | None:
     ready = [s for s in signs if len(s.get('samples') or []) >= MIN_SAMPLES]
     if not ready or not raw_frames:
         return None
+
+    arr = np.asarray(raw_frames, dtype=np.float64)
+    if arr.ndim == 2 and arr.shape[0] >= 5:
+        motion = np.zeros(arr.shape[0])
+        for i in range(1, arr.shape[0]):
+            motion[i] = frame_distance(arr[i], arr[i - 1])
+        if float(motion.mean()) < 0.025 or float(motion.max()) < 0.06:
+            return {'match': None, 'peek': None, 'ranked': [], 'reason': 'idle'}
 
     windows = build_windows(raw_frames)
     ranked = []
@@ -146,16 +154,20 @@ def classify(raw_frames: list, signs: list, threshold: float = 0.24) -> dict | N
     margin = (second['d'] - best['d']) if second else float('inf')
 
     ready_count = len(ready)
-    min_margin = 0.0
-    if ready_count == 2:
-        min_margin = 0.006
-    elif 2 < ready_count <= 8:
-        min_margin = 0.01
-    elif ready_count > 8:
-        min_margin = 0.015
+    min_margin = 0.02
+    if ready_count == 1:
+        min_margin = 0.0
+        threshold = min(threshold, 0.14)  # single class: very strict distance
+    elif ready_count == 2:
+        min_margin = 0.025
+    elif ready_count <= 8:
+        min_margin = 0.03
+    else:
+        min_margin = 0.035
 
-    max_dist = threshold + (0.04 if ready_count == 1 else 0.0)
-    max_dist -= min(0.02, max(0, best['n'] - MIN_SAMPLES) * 0.002)
+    max_dist = threshold
+    if best['similarity'] < 78:
+        return {'match': None, 'peek': best, 'ranked': ranked[:3], 'reason': 'low_sim'}
 
     if best['d'] > max_dist or margin < min_margin:
         return {

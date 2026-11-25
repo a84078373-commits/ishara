@@ -35,17 +35,23 @@ let verifyTarget = null;
 let verifyFailAt = 0;
 let recognizing = false;
 let lastRecognizeAt = 0;
-const SAME_SIGN_COOLDOWN_MS = 1400;
-/** Live multi-part gesture capture (~3–4s), confirm after motion settles. */
+const SAME_SIGN_COOLDOWN_MS = 2200;
+/** Live multi-part gesture — strict so idle standing never speaks. */
 const LIVE_BUFFER_MS = 4200;
-const GESTURE_SETTLE_MS = 520;
-const MIN_GESTURE_MS = 1100;
-const MOTION_THRESH = 0.055;
+const GESTURE_SETTLE_MS = 650;
+const MIN_GESTURE_MS = 1300;
+const MAX_GESTURE_MS = 4500;
+const MOTION_THRESH = 0.12;          // ignore camera jitter / tiny sway
+const MIN_MOTION_FRAMES = 8;         // need sustained movement
+const MIN_MOTION_SUM = 1.35;         // total energy across the gesture
+const MIN_MATCH_SCORE = 78;          // never speak below this
 let gestureArmed = false;
 let gestureStartAt = 0;
 let lastMotionAt = 0;
 let lastFeatFrame = null;
 let softPeekAt = 0;
+let motionFrames = 0;
+let motionSum = 0;
 
 const video = $('video');
 const canvas = $('overlay');
@@ -268,13 +274,15 @@ function startVerify(id) {
   pending = null;
   latched = null;
   gestureArmed = false;
+  motionFrames = 0;
+  motionSum = 0;
   lastFeatFrame = null;
   $('trainer').close();
   view('live');
   const name = signs[id].name;
-  setVerifyBanner('waiting', `⏳ اختبار: نفّذ إشارة «${name}» كاملة (كل الأجزاء) ثم انتظر لحظة`);
+  setVerifyBanner('waiting', `⏳ اختبار: نفّذ إشارة «${name}» كاملة بوضوح ثم توقف لحظة`);
   $('result').textContent = 'اختبار التعرّف…';
-  $('result-note').textContent = `نفّذ «${name}» خلال ~3–4 ثوانٍ كما درّبتها — النظام ينتظر اكتمال الحركة`;
+  $('result-note').textContent = `نفّذ «${name}» بحركة واضحة (~3–4 ث) — الوقوف بدون حركة لن يُحتسب`;
   $('result-ring').textContent = '?';
   $('score').textContent = '—';
   $('meter-fill').style.width = '0%';
@@ -1103,6 +1111,8 @@ function loop(now) {
           pending = null;
           latched = null;
           gestureArmed = false;
+          motionFrames = 0;
+          motionSum = 0;
           lastFeatFrame = null;
           smoothHands = [];
           trails = [[], []];
@@ -1118,11 +1128,10 @@ function loop(now) {
         const f = features(result);
         if (recording) capture.push({ f, visible });
         if (visible) {
-          // Motion between consecutive feature frames (multi-part detection)
           let motion = 0;
           if (lastFeatFrame) {
             let sum = 0;
-            const step = 4;
+            const step = 3;
             for (let i = 0; i < f.length; i += step) {
               const d = f[i] - lastFeatFrame[i];
               sum += d * d;
@@ -1140,95 +1149,129 @@ function loop(now) {
               if (!gestureArmed) {
                 gestureArmed = true;
                 gestureStartAt = now;
+                motionFrames = 0;
+                motionSum = 0;
                 if (!verifyTarget) {
-                  $('result-note').textContent = 'جاري التقاط الإشارة… أكمل كل الأجزاء';
+                  $('result-note').textContent = 'جاري التقاط إشارة واضحة… أكمل الحركة';
                   $('result-ring').textContent = '…';
                 }
               }
+              motionFrames += 1;
+              motionSum += motion;
               lastMotionAt = now;
             }
 
             const gestureMs = gestureArmed ? (now - gestureStartAt) : 0;
+
+            // Cancel weak / accidental arming (standing still with tiny sway)
+            if (gestureArmed && gestureMs >= 900 && motionFrames < 3 && (now - lastMotionAt) > 400) {
+              gestureArmed = false;
+              motionFrames = 0;
+              motionSum = 0;
+              if (!verifyTarget && !current) {
+                $('result-note').textContent = 'بانتظار إشارة واضحة — تحرّك بوضوح ثم توقف';
+                $('result-ring').textContent = '○';
+              }
+            }
+
+            // Timeout very long unresolved gestures
+            if (gestureArmed && gestureMs > MAX_GESTURE_MS) {
+              gestureArmed = false;
+              motionFrames = 0;
+              motionSum = 0;
+            }
+
+            const strongEnough = motionFrames >= MIN_MOTION_FRAMES && motionSum >= MIN_MOTION_SUM;
             const settled = gestureArmed
+              && strongEnough
               && (now - lastMotionAt) >= GESTURE_SETTLE_MS
               && gestureMs >= MIN_GESTURE_MS
-              && buffer.length >= 12;
+              && buffer.length >= 14;
 
-            // Soft live peek while moving (UI only — never speak mid-gesture)
-            const wantSoftPeek = gestureArmed
-              && !settled
-              && gestureMs >= 700
-              && now - softPeekAt > 280
-              && !recognizing;
-
-            if (settled && !recognizing && now - lastRecognizeAt > 200) {
+            if (settled && !recognizing && now - lastRecognizeAt > 350) {
               lastRecognizeAt = now;
-              // Prefer frames from this gesture start (full multi-part clip)
-              const clip = buffer.filter((x) => x.t >= gestureStartAt - 80);
-              const frames = (clip.length >= 10 ? clip : buffer).map((x) => x.f);
-              // Cap payload ~72 frames while keeping timing
+              const clip = buffer.filter((x) => x.t >= gestureStartAt - 60);
+              const frames = (clip.length >= 12 ? clip : buffer).map((x) => x.f);
               const step = Math.max(1, Math.ceil(frames.length / 72));
               const payload = frames.filter((_, i) => i % step === 0);
 
-              const applyResult = (match, peek) => {
-                if (!match && peek && peek.similarity >= 78) {
-                  // Only promote very strong peeks after settle — avoids short-word steal
-                  if (verifyTarget == null || peek.id === verifyTarget) {
-                    match = { id: peek.id, name: peek.name, similarity: peek.similarity, engine: 'peek' };
-                  }
-                }
+              // Reset arming before async so standing can't double-fire
+              const usedMotionFrames = motionFrames;
+              const usedMotionSum = motionSum;
+              gestureArmed = false;
+              motionFrames = 0;
+              motionSum = 0;
 
-                if (!match && peek) {
-                  $('result').textContent = peek.name;
-                  $('score').textContent = peek.similarity + '%';
-                  $('meter-fill').style.width = Math.max(8, peek.similarity) + '%';
-                  $('result-note').textContent = `قريب من «${peek.name}» — أعد الحركة أوضح`;
-                  $('result-ring').textContent = '…';
-                  gestureArmed = false;
+              const applyResult = (match, peek, reason) => {
+                // Never promote peeks — idle standing often gets a soft "peek"
+                if (!match) {
+                  if (reason === 'idle') {
+                    if (!verifyTarget) {
+                      $('result-note').textContent = 'ما في إشارة واضحة — أنت واقف أو الحركة ضعيفة';
+                      $('result-ring').textContent = '○';
+                      $('score').textContent = '—';
+                      $('meter-fill').style.width = '0%';
+                    }
+                    return;
+                  }
+                  if (peek && peek.similarity >= 55) {
+                    $('result').textContent = peek.name;
+                    $('score').textContent = peek.similarity + '%';
+                    $('meter-fill').style.width = Math.max(8, peek.similarity) + '%';
+                    $('result-note').textContent = `غير مؤكد («${peek.name}» ${peek.similarity}%) — أعد الإشارة أوضح`;
+                    $('result-ring').textContent = '…';
+                  } else if (!verifyTarget) {
+                    $('result-note').textContent = 'لم يُعتمد — نفّذ الإشارة بوضوح ثم توقف لحظة';
+                    $('result-ring').textContent = '○';
+                  }
                   return;
                 }
 
-                if (match) {
-                  const nowMs = performance.now();
-                  if (latched === match.id && (nowMs - latchedAt) < SAME_SIGN_COOLDOWN_MS) {
-                    gestureArmed = false;
-                    return;
-                  }
-                  $('result').textContent = match.name;
+                if ((match.similarity || 0) < MIN_MATCH_SCORE) {
+                  $('result-note').textContent = `ثقة منخفضة (${match.similarity}%) — لم يُنطق. أعد الحركة أوضح`;
+                  $('result-ring').textContent = '…';
                   $('score').textContent = match.similarity + '%';
-                  $('meter-fill').style.width = match.similarity + '%';
-                  recognized(match);
-                  latched = match.id;
-                  latchedAt = nowMs;
-                  gestureArmed = false;
-                  // Keep a short tail so next gesture can start cleanly
-                  buffer = buffer.filter((x) => nowMs - x.t < 600);
-                  lastFeatFrame = null;
+                  return;
                 }
+
+                const nowMs = performance.now();
+                if (latched === match.id && (nowMs - latchedAt) < SAME_SIGN_COOLDOWN_MS) return;
+
+                $('result').textContent = match.name;
+                $('score').textContent = match.similarity + '%';
+                $('meter-fill').style.width = match.similarity + '%';
+                recognized(match);
+                latched = match.id;
+                latchedAt = nowMs;
+                buffer = buffer.filter((x) => nowMs - x.t < 500);
+                lastFeatFrame = null;
               };
 
               if (flaskMode) {
                 recognizing = true;
-                $('result-note').textContent = 'تحليل الإشارة الكاملة…';
+                $('result-note').textContent = `تحليل دقيق… (حركة ${usedMotionFrames} / طاقة ${usedMotionSum.toFixed(1)})`;
                 api.recognize(payload).then((res) => {
                   recognizing = false;
-                  applyResult(res.match, res.peek);
+                  applyResult(res.match, res.peek, res.reason);
                 }).catch((err) => {
                   recognizing = false;
-                  gestureArmed = false;
                   console.warn('recognize failed', err);
                 });
               } else {
                 const windows = buildWindows(buffer);
-                applyResult(classify(windows, signs), peekMatch(windows, signs));
-                gestureArmed = false;
+                const match = classify(windows, signs);
+                const peek = peekMatch(windows, signs);
+                applyResult(match, peek);
               }
-            } else if (wantSoftPeek && flaskMode) {
+            } else if (gestureArmed && strongEnough && gestureMs >= 800 && now - softPeekAt > 400) {
               softPeekAt = now;
-              const recent = buffer.filter((x) => x.t >= gestureStartAt - 80).map((x) => x.f);
-              if (recent.length >= 10 && !recognizing) {
-                // lightweight progress hint only
-                $('result-note').textContent = `التقاط… ${Math.min(4, (gestureMs / 1000)).toFixed(1)} ث — أكمل الحركة`;
+              if (!verifyTarget) {
+                $('result-note').textContent = `التقاط… ${(gestureMs / 1000).toFixed(1)} ث — أكمل ثم توقف`;
+              }
+            } else if (!gestureArmed && !recognizing && !verifyTarget && now - softPeekAt > 2000) {
+              softPeekAt = now;
+              if (!current) {
+                $('result-note').textContent = 'بانتظار إشارة واضحة — لا ينطق وأنت واقف فقط';
               }
             }
           }
