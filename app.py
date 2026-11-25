@@ -231,7 +231,7 @@ def ensure_tts(sign_id: int):
 
 @app.post('/api/tts/warmup')
 def warmup_tts():
-    """Cache mp3 for trained words only (never during live speak)."""
+    """Generate+cache mp3 for every word in the library (add-time policy)."""
     try:
         signs = storage.load_signs()
         cached = 0
@@ -239,11 +239,7 @@ def warmup_tts():
         errors = []
         for s in signs:
             name = (s.get('name') or '').strip()
-            samples = s.get('samples') or []
-            # Trained words + any already-cached stay warm; skip empty dictionary stubs
             if not name:
-                continue
-            if len(samples) < MIN_SAMPLES and not tts.has_clip(int(s['id']), name):
                 continue
             try:
                 _, from_cache = tts.ensure_clip(int(s['id']), name)

@@ -429,23 +429,28 @@ $('add-sign')?.addEventListener('click', async () => {
   const name = prompt('اسم الإشارة / الكلمة الجديدة:', 'كلمة جديدة');
   if (!name?.trim()) return;
   try {
+    toast('جاري حفظ الكلمة وتوليد الصوت…');
     if (flaskMode) {
       const res = await api.createSign(name.trim());
       signs.push(fromApiSign(res.sign));
+      // Server already generated mp3 on create — pull into browser memory now
+      const ok = await cacheVoiceForSign(signs[res.sign.id]);
       openTrainer(res.sign.id);
-      // Generate+cache voice file once in background
-      cacheVoiceForSign(signs[res.sign.id]).then((ok) => {
-        if (ok) toast(`صوت «${res.sign.name}» محفوظ — النطق سيكون فوريًا`);
-      });
-    } else {
-      const id = signs.length;
-      signs.push({ id, name: name.trim().slice(0, 40), samples: [], verified: false, verifyHits: 0 });
-      persist();
-      openTrainer(id);
-      cacheVoiceForSign(signs[id]).catch(() => {});
+      render();
+      toast(
+        ok || res.voiceCached
+          ? `✓ «${res.sign.name}» + صوت محفوظ · سجّل مثالين`
+          : `أُضيفت «${res.sign.name}» · الصوت: ${res.voiceError || 'لاحقًا'}`,
+      );
+      return;
     }
+    const id = signs.length;
+    signs.push({ id, name: name.trim().slice(0, 40), samples: [], verified: false, verifyHits: 0 });
+    persist();
+    const ok = await cacheVoiceForSign(signs[id]);
+    openTrainer(id);
     render();
-    toast('أُضيفت الإشارة. سجّل مثالين على الأقل.');
+    toast(ok ? `✓ «${name.trim()}» + صوت محفوظ` : `أُضيفت · سجّل مثالين`);
   } catch (e) {
     toast(e.message);
   }
