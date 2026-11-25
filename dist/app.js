@@ -35,16 +35,17 @@ let verifyTarget = null;
 let verifyFailAt = 0;
 let recognizing = false;
 let lastRecognizeAt = 0;
-const SAME_SIGN_COOLDOWN_MS = 2200;
-/** Live multi-part gesture — strict so idle standing never speaks. */
-const LIVE_BUFFER_MS = 4200;
-const GESTURE_SETTLE_MS = 650;
-const MIN_GESTURE_MS = 1300;
-const MAX_GESTURE_MS = 4500;
-const MOTION_THRESH = 0.12;          // ignore camera jitter / tiny sway
-const MIN_MOTION_FRAMES = 8;         // need sustained movement
-const MIN_MOTION_SUM = 1.35;         // total energy across the gesture
-const MIN_MATCH_SCORE = 78;          // never speak below this
+const SAME_SIGN_COOLDOWN_MS = 1800;
+/** Live two-beat gestures: wait for parts, then settle → fast speak. */
+const LIVE_BUFFER_MS = 4800;
+const GESTURE_SETTLE_MS = 420;       // after 2nd beat, confirm quickly
+const GESTURE_SETTLE_1BEAT_MS = 700; // single-beat signs need longer settle
+const MIN_GESTURE_MS = 900;
+const MAX_GESTURE_MS = 5000;
+const MOTION_THRESH = 0.11;
+const MIN_MOTION_FRAMES = 6;
+const MIN_MOTION_SUM = 1.1;
+const MIN_MATCH_SCORE = 74;
 let gestureArmed = false;
 let gestureStartAt = 0;
 let lastMotionAt = 0;
@@ -52,6 +53,8 @@ let lastFeatFrame = null;
 let softPeekAt = 0;
 let motionFrames = 0;
 let motionSum = 0;
+let livePeaks = 0;
+let peakActive = false;
 
 const video = $('video');
 const canvas = $('overlay');
@@ -276,13 +279,15 @@ function startVerify(id) {
   gestureArmed = false;
   motionFrames = 0;
   motionSum = 0;
+  livePeaks = 0;
+  peakActive = false;
   lastFeatFrame = null;
   $('trainer').close();
   view('live');
   const name = signs[id].name;
-  setVerifyBanner('waiting', `⏳ اختبار: نفّذ إشارة «${name}» كاملة بوضوح ثم توقف لحظة`);
+  setVerifyBanner('waiting', `⏳ اختبار: «${name}» — حركة 1 ثم حركة 2 ثم توقف`);
   $('result').textContent = 'اختبار التعرّف…';
-  $('result-note').textContent = `نفّذ «${name}» بحركة واضحة (~3–4 ث) — الوقوف بدون حركة لن يُحتسب`;
+  $('result-note').textContent = `نفّذ «${name}» بجزئين واضحين — بعده نطق سريع ودقيق`;
   $('result-ring').textContent = '?';
   $('score').textContent = '—';
   $('meter-fill').style.width = '0%';
@@ -1113,6 +1118,8 @@ function loop(now) {
           gestureArmed = false;
           motionFrames = 0;
           motionSum = 0;
+          livePeaks = 0;
+          peakActive = false;
           lastFeatFrame = null;
           smoothHands = [];
           trails = [[], []];
@@ -1122,7 +1129,7 @@ function loop(now) {
       }
 
       // While recording: keep every detect. Live mode: ~20 fps features.
-      const sampleEvery = recording ? 0 : 45;
+      const sampleEvery = recording ? 0 : 40;
       if (now - lastFeature >= sampleEvery) {
         lastFeature = now;
         const f = features(result);
@@ -1151,42 +1158,54 @@ function loop(now) {
                 gestureStartAt = now;
                 motionFrames = 0;
                 motionSum = 0;
+                livePeaks = 0;
+                peakActive = false;
                 if (!verifyTarget) {
-                  $('result-note').textContent = 'جاري التقاط إشارة واضحة… أكمل الحركة';
+                  $('result-note').textContent = 'التقاط… الجزء 1 ثم الجزء 2';
                   $('result-ring').textContent = '…';
                 }
+              }
+              if (!peakActive) {
+                livePeaks += 1;
+                peakActive = true;
               }
               motionFrames += 1;
               motionSum += motion;
               lastMotionAt = now;
+            } else if (peakActive && motion < MOTION_THRESH * 0.45) {
+              peakActive = false; // valley between beats
             }
 
             const gestureMs = gestureArmed ? (now - gestureStartAt) : 0;
 
-            // Cancel weak / accidental arming (standing still with tiny sway)
             if (gestureArmed && gestureMs >= 900 && motionFrames < 3 && (now - lastMotionAt) > 400) {
               gestureArmed = false;
               motionFrames = 0;
               motionSum = 0;
+              livePeaks = 0;
+              peakActive = false;
               if (!verifyTarget && !current) {
-                $('result-note').textContent = 'بانتظار إشارة واضحة — تحرّك بوضوح ثم توقف';
+                $('result-note').textContent = 'بانتظار إشارة واضحة — حركتان ثم توقف';
                 $('result-ring').textContent = '○';
               }
             }
 
-            // Timeout very long unresolved gestures
             if (gestureArmed && gestureMs > MAX_GESTURE_MS) {
               gestureArmed = false;
               motionFrames = 0;
               motionSum = 0;
+              livePeaks = 0;
+              peakActive = false;
             }
 
             const strongEnough = motionFrames >= MIN_MOTION_FRAMES && motionSum >= MIN_MOTION_SUM;
+            const settleNeed = livePeaks >= 2 ? GESTURE_SETTLE_MS : GESTURE_SETTLE_1BEAT_MS;
             const settled = gestureArmed
               && strongEnough
-              && (now - lastMotionAt) >= GESTURE_SETTLE_MS
+              && livePeaks >= 1
+              && (now - lastMotionAt) >= settleNeed
               && gestureMs >= MIN_GESTURE_MS
-              && buffer.length >= 14;
+              && buffer.length >= 12;
 
             if (settled && !recognizing && now - lastRecognizeAt > 350) {
               lastRecognizeAt = now;
@@ -1195,12 +1214,14 @@ function loop(now) {
               const step = Math.max(1, Math.ceil(frames.length / 72));
               const payload = frames.filter((_, i) => i % step === 0);
 
-              // Reset arming before async so standing can't double-fire
               const usedMotionFrames = motionFrames;
               const usedMotionSum = motionSum;
+              const usedPeaks = livePeaks;
               gestureArmed = false;
               motionFrames = 0;
               motionSum = 0;
+              livePeaks = 0;
+              peakActive = false;
 
               const applyResult = (match, peek, reason) => {
                 // Never promote peeks — idle standing often gets a soft "peek"
@@ -1249,7 +1270,7 @@ function loop(now) {
 
               if (flaskMode) {
                 recognizing = true;
-                $('result-note').textContent = `تحليل دقيق… (حركة ${usedMotionFrames} / طاقة ${usedMotionSum.toFixed(1)})`;
+                $('result-note').textContent = `تحليل سريع… ${usedPeaks} جزء · ثقة عالية`;
                 api.recognize(payload).then((res) => {
                   recognizing = false;
                   applyResult(res.match, res.peek, res.reason);
@@ -1263,15 +1284,16 @@ function loop(now) {
                 const peek = peekMatch(windows, signs);
                 applyResult(match, peek);
               }
-            } else if (gestureArmed && strongEnough && gestureMs >= 800 && now - softPeekAt > 400) {
+            } else if (gestureArmed && strongEnough && gestureMs >= 500 && now - softPeekAt > 280) {
               softPeekAt = now;
               if (!verifyTarget) {
-                $('result-note').textContent = `التقاط… ${(gestureMs / 1000).toFixed(1)} ث — أكمل ثم توقف`;
+                const partLabel = livePeaks >= 2 ? '✓ جزآن' : (livePeaks === 1 ? 'الجزء 1… أنهِ الجزء 2' : 'ابدأ الحركة');
+                $('result-note').textContent = `${partLabel} · ${(gestureMs / 1000).toFixed(1)} ث`;
               }
             } else if (!gestureArmed && !recognizing && !verifyTarget && now - softPeekAt > 2000) {
               softPeekAt = now;
               if (!current) {
-                $('result-note').textContent = 'بانتظار إشارة واضحة — لا ينطق وأنت واقف فقط';
+                $('result-note').textContent = 'بانتظار إشارة — حركتان باليد ثم توقف للنطق';
               }
             }
           }
@@ -1373,54 +1395,106 @@ $('record').onclick = async () => {
         step: `استعد… ${i}`,
         hand: '✓ اليد ظاهرة',
         handOk: true,
-        hint: 'بعد العد نفّذ الإشارة كاملة بوضوح',
+        hint: 'بعد العد: حركة 1 → توقف قصير → حركة 2',
         progress: 15 + (3 - i) * 10,
       });
-      showTrainResult(false, `${i}`, `استعد لتسجيل «${word}»`);
+      showTrainResult(false, `${i}`, `حركتان واضحتان لـ «${word}»`);
       await wait(650);
       if (!running || session !== token) throw Error('تم إلغاء التسجيل بعد إيقاف الكاميرا.');
     }
 
     capture = [];
-    const captureMs = 4000; // full multi-part gestures (e.g. كيف حالك)
+    const captureMs = 4800;
+    const minCaptureMs = 2200;
     const started = performance.now();
-    $('recording').textContent = '●';
-    while (performance.now() - started < captureMs) {
+    let trainPeaks = 0;
+    let trainPeakActive = false;
+    let lastTrainFeat = null;
+    let lastTrainMotionAt = started;
+    $('recording').textContent = '①';
+
+    while (true) {
       if (!running || session !== token) throw Error('تم إلغاء التسجيل.');
-      const p = 45 + ((performance.now() - started) / captureMs) * 50;
+      const elapsed = performance.now() - started;
+      if (elapsed >= captureMs) break;
+
+      // Count motion beats live from captured frames
+      if (capture.length >= 2) {
+        const a = capture[capture.length - 2].f;
+        const b = capture[capture.length - 1].f;
+        let sum = 0;
+        for (let i = 0; i < b.length; i += 3) {
+          const d = b[i] - a[i];
+          sum += d * d;
+        }
+        const m = Math.sqrt(sum / Math.ceil(b.length / 3));
+        if (m >= 0.1) {
+          if (!trainPeakActive) {
+            trainPeaks += 1;
+            trainPeakActive = true;
+          }
+          lastTrainMotionAt = performance.now();
+        } else if (trainPeakActive && m < 0.045) {
+          trainPeakActive = false;
+        }
+        lastTrainFeat = b;
+      }
+
+      // Smart early stop: both beats captured + short settle
+      if (
+        elapsed >= minCaptureMs
+        && trainPeaks >= 2
+        && (performance.now() - lastTrainMotionAt) >= 480
+      ) {
+        break;
+      }
+
       const liveVisible = $('hands').textContent.includes('ظاهرة');
-      const secLeft = Math.max(0, ((captureMs - (performance.now() - started)) / 1000)).toFixed(1);
+      const secLeft = Math.max(0, ((captureMs - elapsed) / 1000)).toFixed(1);
+      let stepMsg = '① نفّذ الحركة الأولى';
+      let hintMsg = 'بعدها توقف لحظة ثم الحركة الثانية';
+      $('recording').textContent = '①';
+      if (trainPeaks === 1) {
+        stepMsg = '①✓ → ② نفّذ الحركة الثانية الآن';
+        hintMsg = 'أكمل الجزء الثاني بوضوح';
+        $('recording').textContent = '②';
+      } else if (trainPeaks >= 2) {
+        stepMsg = '①✓ ②✓ — ثبّت لحظة';
+        hintMsg = 'تم التقاط الجزئين';
+        $('recording').textContent = '✓';
+      }
       setCoach({
         title: `تدريب «${word}» · مثال ${takeNum}`,
-        step: '● سجّل الآن — نفّذ كل أجزاء الإشارة',
-        hand: liveVisible ? `✓ يد ظاهرة · إطارات ${capture.length}` : '⚠ أرجع اليد للإطار',
+        step: stepMsg,
+        hand: liveVisible ? `✓ يد · ${capture.length} إطار · أجزاء ${Math.min(2, trainPeaks)}/2` : '⚠ أرجع اليد',
         handOk: liveVisible,
-        hint: liveVisible
-          ? `أكمل كل الحركات (${secLeft} ث متبقية)`
-          : 'اليد اختفت — أرجعها بسرعة',
-        progress: p,
+        hint: liveVisible ? `${hintMsg} (${secLeft} ث)` : 'اليد اختفت — أرجعها',
+        progress: 45 + Math.min(50, (elapsed / captureMs) * 50),
       });
-      showTrainResult(false, 'جاري التسجيل…', liveVisible ? `حفظ «${word}» كاملًا · ${capture.length} إطار` : 'أظهر اليد الآن');
-      await wait(40);
+      showTrainResult(false, trainPeaks >= 2 ? 'جزآن ✓' : `أجزاء ${trainPeaks}/2`, `تسجيل ذكي لـ «${word}»`);
+      await wait(35);
     }
 
     const frames = capture.filter((x) => x.visible).map((x) => x.f);
     const ratio = capture.length ? frames.length / capture.length : 0;
 
-    // Accept short-but-valid takes; resample() fills SEQ_LEN
     if (capture.length < 3 && frames.length < 3) {
       throw Error(`ما انحفظت إطارات كافية (${capture.length}). انتظر ✓ جاهز للمتتبّع، وخلّ اليد ظاهرة.`);
     }
-    if (frames.length < 3) {
-      throw Error(`اليد ظهرت في ${frames.length} إطار فقط. خلّها ظاهرة طول التسجيل.`);
+    if (frames.length < 8) {
+      throw Error(`الإشارة قصيرة جدًا (${frames.length} إطار). نفّذ الحركتين كاملتين.`);
     }
     if (capture.length >= 8 && ratio < 0.2) {
       throw Error('اليد اختفت معظم الوقت. أعد التسجيل وخلّها داخل الإطار.');
+    }
+    if (trainPeaks < 1) {
+      throw Error('ما انرصدت حركة واضحة. أعد التسجيل: حركة 1 ثم حركة 2 بوضوح.');
     }
 
     let q = Math.max(qualityScore(frames), 35);
     let count;
     let ready;
+    let peaksSaved = trainPeaks;
 
     if (flaskMode) {
       const res = await api.uploadSample(id, frames);
@@ -1428,6 +1502,7 @@ $('record').onclick = async () => {
       q = res.quality || q;
       count = res.count;
       ready = res.ready;
+      peaksSaved = res.peaks || trainPeaks;
       if (res.voiceError) toast('حُفظت الإشارة؛ الصوت لاحقًا: ' + res.voiceError);
     } else {
       signs[id].samples.push(resample(frames));
@@ -1443,30 +1518,35 @@ $('record').onclick = async () => {
     current = null;
     render();
 
+    const peaksNote = peaksSaved >= 2 ? 'جزآن ✓' : 'جزء واحد — إن كانت حركتين أعد التسجيل';
     $('recording').textContent = '✓';
     setCoach({
       title: `تدريب «${word}»`,
       step: `✓ تم حفظ المثال ${count}`,
-      hand: `جودة ${q}% · إطارات ${frames.length}${flaskMode ? ' · Flask' : ''}`,
+      hand: `جودة ${q}% · ${peaksNote} · ${frames.length} إطار`,
       handOk: true,
-      hint: ready ? 'الآن نفّذ الإشارة للتعرّف' : `سجّل مثال ${count + 1} لإكمال التدريب`,
+      hint: ready ? 'الآن نفّذ الإشارة (جزآن) للتعرّف السريع' : `سجّل مثال ${count + 1} بنفس الأسلوب`,
       progress: 100,
     });
     showTrainResult(
       true,
       `✓ حُفظ: ${word}`,
       ready
-        ? `أمثلة ${count} على السيرفر — نفّذ الإشارة الآن`
-        : `مثال ${count}/${MIN_SAMPLES} — سجّل مثالًا آخر`,
+        ? `أمثلة ${count} · ${peaksNote} — نفّذ الإشارة الآن`
+        : `مثال ${count}/${MIN_SAMPLES} · ${peaksNote}`,
     );
     $('score').textContent = q + '%';
     $('meter-fill').style.width = q + '%';
 
-    toast(
-      ready
-        ? `✓ Flask حفظ «${word}» (${count}). نفّذ الإشارة.`
-        : `✓ تم حفظ مثال ${count}. بقي ${MIN_SAMPLES - count}.`,
-    );
+    if (peaksSaved < 2) {
+      toast(`حُفظ «${word}» لكن رُصد جزء واحد فقط — للإشارة من حركتين أعد التسجيل.`);
+    } else {
+      toast(
+        ready
+          ? `✓ «${word}» جاهزة (جزآن). نفّذها الآن للنطق السريع.`
+          : `✓ مثال ${count} بجزئين. بقي ${MIN_SAMPLES - count}.`,
+      );
+    }
 
     await wait(1100);
 

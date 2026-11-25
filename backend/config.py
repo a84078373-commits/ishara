@@ -19,13 +19,13 @@ AUDIO_DIR = DATA_DIR / 'audio'
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
-# Longer sequence = better multi-part gestures (e.g. «كيف حالك»)
-SEQ_LEN = 24
+# 32 frames preserves two-beat gestures (part A → pause → part B)
+SEQ_LEN = 32
 FEAT_DIM = 152
 MIN_SAMPLES = 2
 MAX_SAMPLES = 12
 MAX_SIGNS = 48
-DATA_VERSION = 3
+DATA_VERSION = 4
 
 DEFAULT_WORDS = [
     'مرحبًا', 'شكرًا', 'نعم', 'لا', 'من فضلك', 'آسف', 'أنا', 'أنت', 'مساعدة', 'ماء',

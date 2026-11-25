@@ -203,7 +203,16 @@ def delete_sign(sign_id: int) -> list[dict]:
 def add_sample(sign_id: int, frames: list) -> dict:
     if not isinstance(frames, list) or len(frames) < 4:
         raise ValueError('عدد الإطارات غير كافٍ')
+    from . import ml_model
+
+    analysis = ml_model.analyze_gesture(frames)
+    if not analysis.get('ok'):
+        raise ValueError('الحركة ضعيفة أو غير واضحة — نفّذ الإشارة بجزئيها بوضوح ثم أعد التسجيل')
+
     q = quality_score(frames)
+    # Boost quality when two motion beats are visible
+    if int(analysis.get('peaks') or 0) >= 2:
+        q = max(q, 78)
     sample = _validate_sample(frames)
     signs = load_signs()
     with _lock:
@@ -214,7 +223,7 @@ def add_sample(sign_id: int, frames: list) -> dict:
         signs[sign_id]['samples'].append(sample)
         signs[sign_id]['verified'] = False
         count = len(signs[sign_id]['samples'])
-        snapshot = json.loads(json.dumps(signs))  # detach for training outside lock
+        snapshot = json.loads(json.dumps(signs))
         _save_unlocked(signs)
         public = list_public(signs)[sign_id]
     model_meta = _retrain(snapshot)
@@ -225,6 +234,8 @@ def add_sample(sign_id: int, frames: list) -> dict:
         'ready': count >= MIN_SAMPLES,
         'minSamples': MIN_SAMPLES,
         'model': model_meta,
+        'peaks': int(analysis.get('peaks') or 0),
+        'gesture': analysis,
     }
 
 
@@ -244,9 +255,14 @@ def export_data() -> dict:
 
 
 def import_data(payload: dict) -> list[dict]:
-    if payload.get('version') != DATA_VERSION or not isinstance(payload.get('signs'), list):
+    if not isinstance(payload.get('signs'), list):
+        raise ValueError('ملف التدريب غير صالح')
+    ver = payload.get('version')
+    if ver not in (DATA_VERSION, 2, 3):
         raise ValueError('ملف التدريب غير صالح')
     signs = payload['signs']
+    if ver != DATA_VERSION:
+        signs = _migrate_samples(signs)
     if not (1 <= len(signs) <= MAX_SIGNS):
         raise ValueError('عدد الإشارات غير صالح')
     cleaned = []

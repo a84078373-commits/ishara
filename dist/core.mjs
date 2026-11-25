@@ -3,12 +3,12 @@ export const WORDS = [
   'مرحبًا', 'شكرًا', 'نعم', 'لا', 'من فضلك', 'آسف', 'أنا', 'أنت', 'مساعدة', 'ماء',
   'طعام', 'بيت', 'مدرسة', 'أهلًا وسهلًا', 'كيف حالك', 'بخير', 'أحبك', 'انتظر', 'أين', 'مع السلامة',
 ];
-export const SEQ_LEN = 24;
+export const SEQ_LEN = 32;
 export const FEAT_DIM = 152;
 export const MAX_SAMPLES = 12;
 export const MIN_SAMPLES = 2;
 export const MAX_SIGNS = 48;
-export const DATA_VERSION = 3;
+export const DATA_VERSION = 4;
 
 const TIP = [4, 8, 12, 16, 20];
 const PIP = [3, 6, 10, 14, 18];
@@ -233,8 +233,10 @@ export function selfConsistency(sign) {
 
 export function validateData(data) {
   if (!Array.isArray(data?.signs)) throw Error('ملف التدريب غير صالح');
-  // Accept v2→v3 soft migrate (resample 16→24)
-  if (data.version !== DATA_VERSION && data.version !== 2) throw Error('ملف التدريب غير صالح');
+  // Soft migrate older versions (resample to current SEQ_LEN)
+  if (data.version !== DATA_VERSION && data.version !== 2 && data.version !== 3) {
+    throw Error('ملف التدريب غير صالح');
+  }
   if (data.signs.length < 1 || data.signs.length > MAX_SIGNS) throw Error('عدد الإشارات غير صالح');
   return data.signs.map((s, i) => {
     if (s.id !== i || typeof s.name !== 'string' || !s.name.trim() || s.name.length > 40) {

@@ -1,4 +1,4 @@
-"""Trainable gesture classifier — multi-part sequence aware."""
+"""Trainable gesture classifier — optimized for 1–2 beat (multi-part) signs."""
 from __future__ import annotations
 
 import json
@@ -45,7 +45,6 @@ CHANNELS = _channel_indices()
 
 
 def motion_profile(frames) -> np.ndarray:
-    """Per-frame motion energy — captures multi-part peaks."""
     arr = np.asarray(frames, dtype=np.float64)
     if arr.ndim != 2 or arr.shape[0] < 2:
         return np.zeros(1, dtype=np.float64)
@@ -55,7 +54,7 @@ def motion_profile(frames) -> np.ndarray:
     return motion
 
 
-def count_motion_peaks(motion: np.ndarray, thresh: float = 0.045) -> int:
+def count_motion_peaks(motion: np.ndarray, thresh: float = 0.04) -> int:
     if motion.size < 3:
         return 0
     peaks = 0
@@ -64,42 +63,106 @@ def count_motion_peaks(motion: np.ndarray, thresh: float = 0.045) -> int:
         if v >= thresh and not active:
             peaks += 1
             active = True
-        elif v < thresh * 0.55:
+        elif v < thresh * 0.5:
             active = False
     return peaks
 
 
+def analyze_gesture(frames) -> dict:
+    """Peak / energy stats used by training QA and idle rejection."""
+    arr = np.asarray(frames, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape[0] < 4:
+        return {'peaks': 0, 'mean': 0.0, 'max': 0.0, 'ok': False, 'split': 0}
+    trimmed = trim_idle(arr)
+    motion = motion_profile(trimmed)
+    peaks = int(count_motion_peaks(motion))
+    mean = float(motion.mean()) if motion.size else 0.0
+    mx = float(motion.max()) if motion.size else 0.0
+    split = _best_split(motion)
+    ok = mean >= 0.022 and mx >= 0.055 and peaks >= 1 and trimmed.shape[0] >= 8
+    return {
+        'peaks': peaks,
+        'mean': mean,
+        'max': mx,
+        'ok': ok,
+        'split': int(split),
+        'frames': int(trimmed.shape[0]),
+    }
+
+
+def _best_split(motion: np.ndarray) -> int:
+    """Valley between two motion beats (part A | part B)."""
+    n = int(motion.size)
+    if n < 8:
+        return n // 2
+    lo = max(2, n // 5)
+    hi = min(n - 2, (4 * n) // 5)
+    if hi <= lo:
+        return n // 2
+    region = motion[lo:hi]
+    # Prefer a quiet valley in the middle third of the clip
+    return int(lo + int(np.argmin(region)))
+
+
+def _part_embed(part: np.ndarray, half_len: int) -> np.ndarray:
+    seq = resample(part if part.shape[0] >= 2 else np.zeros((2, FEAT_DIM)), half_len)
+    sub = seq[:, CHANNELS]
+    vel = np.diff(sub, axis=0, prepend=sub[:1])
+    picks = [0, half_len // 2, half_len - 1]
+    return np.concatenate([
+        sub[picks].reshape(-1),
+        sub.mean(axis=0),
+        sub.std(axis=0),
+        vel.mean(axis=0),
+        vel.std(axis=0),
+    ]).astype(np.float64)
+
+
 def embed_sequence(frames) -> np.ndarray:
-    """Temporal embedding: whole clip + 3 segments + motion peaks (multi-part)."""
+    """
+    Embedding tuned for two-beat signs:
+    - explicit part-A / part-B descriptors split at motion valley
+    - full-sequence keyframes + peak/duration stats
+    """
     raw = np.asarray(frames, dtype=np.float64)
     if raw.ndim != 2 or raw.shape[0] == 0:
         raw = np.zeros((SEQ_LEN, FEAT_DIM))
     trimmed = trim_idle(raw)
+    if trimmed.shape[0] < 2:
+        trimmed = raw
+
+    motion = motion_profile(trimmed)
+    split = _best_split(motion)
+    half = max(8, SEQ_LEN // 2)
+    part_a = _part_embed(trimmed[: max(2, split + 1)], half)
+    part_b = _part_embed(trimmed[min(trimmed.shape[0] - 2, split):], half)
+
     seq = resample(trimmed, SEQ_LEN)
     sub = seq[:, CHANNELS]
     vel = np.diff(sub, axis=0, prepend=sub[:1])
     acc = np.diff(vel, axis=0, prepend=vel[:1])
-
-    # 5 keyframes across the full multi-part sequence
     picks = [0, SEQ_LEN // 4, SEQ_LEN // 2, (3 * SEQ_LEN) // 4, SEQ_LEN - 1]
     keyframes = sub[picks].reshape(-1)
 
-    # Three temporal thirds — distinguishes prefix-only vs full gesture
-    thirds = []
-    for t0, t1 in ((0, SEQ_LEN // 3), (SEQ_LEN // 3, 2 * SEQ_LEN // 3), (2 * SEQ_LEN // 3, SEQ_LEN)):
-        part = sub[t0:t1]
-        thirds.append(part.mean(axis=0))
-        thirds.append(part.std(axis=0))
-    thirds_vec = np.concatenate(thirds)
+    # Four temporal quarters for finer multi-part shape
+    quarters = []
+    q = SEQ_LEN // 4
+    for i in range(4):
+        chunk = sub[i * q:(i + 1) * q]
+        quarters.append(chunk.mean(axis=0))
+        quarters.append(chunk.std(axis=0))
+    quarters_vec = np.concatenate(quarters)
 
-    motion = motion_profile(trimmed if trimmed.shape[0] >= 4 else seq)
-    motion_energy = np.linalg.norm(vel, axis=1)
     peaks = float(count_motion_peaks(motion))
-    duration_proxy = float(min(1.0, trimmed.shape[0] / 60.0))  # ~3s at 20fps → 1.0
+    motion_energy = np.linalg.norm(vel, axis=1)
+    duration_proxy = float(min(1.0, trimmed.shape[0] / 72.0))
+    split_ratio = float(split / max(1, trimmed.shape[0] - 1))
 
     vec = np.concatenate([
+        part_a,
+        part_b,
         keyframes,
-        thirds_vec,
+        quarters_vec,
         sub.mean(axis=0),
         sub.std(axis=0),
         vel.mean(axis=0),
@@ -110,8 +173,10 @@ def embed_sequence(frames) -> np.ndarray:
             motion_energy.std(),
             motion_energy.max(),
             float(np.argmax(motion_energy)) / max(1, SEQ_LEN - 1),
-            peaks / 5.0,
+            peaks / 4.0,
             duration_proxy,
+            split_ratio,
+            1.0 if peaks >= 2 else 0.0,
         ]),
     ]).astype(np.float64)
     return np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0)
@@ -129,11 +194,14 @@ def _dataset(signs: list[dict]):
             arr = np.asarray(sample, dtype=np.float64)
             X.append(embed_sequence(arr))
             y.append(int(s['id']))
-            # Light augmentation: slight time jitter via trim variants
-            if arr.shape[0] >= 8:
+            if arr.shape[0] >= 10:
+                # Time jitter — keeps two-beat structure
                 X.append(embed_sequence(arr[1:]))
                 y.append(int(s['id']))
                 X.append(embed_sequence(arr[:-1]))
+                y.append(int(s['id']))
+                # Mild stretch: drop every other frame once
+                X.append(embed_sequence(arr[::2] if arr.shape[0] >= 16 else arr))
                 y.append(int(s['id']))
     if not X:
         return None, None, []
@@ -158,8 +226,8 @@ def train_from_signs(signs: list[dict]) -> dict:
     min_per_class = int(positive.min()) if len(positive) else 0
 
     base = ExtraTreesClassifier(
-        n_estimators=360,
-        max_depth=22,
+        n_estimators=420,
+        max_depth=24,
         min_samples_leaf=1,
         class_weight='balanced_subsample',
         random_state=42,
@@ -184,11 +252,10 @@ def train_from_signs(signs: list[dict]) -> dict:
         'samples': int(len(y)),
         'labels': labels,
         'dim': int(X.shape[1]),
-        'engine': 'extratrees+multipart',
+        'engine': 'extratrees+twobeat',
         'seqLen': SEQ_LEN,
     }
     with _lock:
-        # Dimension changed — drop old incompatible model file first
         joblib.dump({'model': pipe, 'meta': meta}, MODEL_PATH)
         META_PATH.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding='utf-8')
         _bundle = {'model': pipe, 'meta': meta}
@@ -231,6 +298,17 @@ def _classes_of(model) -> list[int]:
     return []
 
 
+def is_intentional_gesture(frames, min_mean: float = 0.024, min_peaks: int = 1, min_max: float = 0.06) -> dict:
+    info = analyze_gesture(frames)
+    ok = (
+        info['ok']
+        and info['mean'] >= min_mean
+        and info['max'] >= min_max
+        and info['peaks'] >= min_peaks
+    )
+    return {**info, 'ok': ok, 'reason': 'ok' if ok else 'idle'}
+
+
 def _score_window(model, frames, ready: dict, classes: list[int]) -> list[dict]:
     emb = embed_sequence(frames).reshape(1, -1)
     try:
@@ -252,26 +330,8 @@ def _score_window(model, frames, ready: dict, classes: list[int]) -> list[dict]:
     return ranked
 
 
-def is_intentional_gesture(frames, min_mean: float = 0.028, min_peaks: int = 1, min_max: float = 0.07) -> dict:
-    """Reject idle standing / tiny jitter — only clear purposeful motion."""
-    arr = np.asarray(frames, dtype=np.float64)
-    if arr.ndim != 2 or arr.shape[0] < 8:
-        return {'ok': False, 'reason': 'short', 'mean': 0.0, 'peaks': 0, 'max': 0.0}
-    motion = motion_profile(trim_idle(arr))
-    mean = float(motion.mean()) if motion.size else 0.0
-    mx = float(motion.max()) if motion.size else 0.0
-    peaks = int(count_motion_peaks(motion, thresh=0.04))
-    ok = mean >= min_mean and mx >= min_max and peaks >= min_peaks
-    return {'ok': ok, 'reason': 'ok' if ok else 'idle', 'mean': mean, 'peaks': peaks, 'max': mx}
-
-
-def predict(frames, signs: list[dict], min_proba: float = 0.72) -> dict | None:
-    """
-    Strict multi-window predict:
-    - Reject idle / standing-still clips
-    - Prefer full gesture window
-    - High confidence + margin required before match
-    """
+def predict(frames, signs: list[dict], min_proba: float = 0.68) -> dict | None:
+    """Fast + strict: idle rejected, two-beat full window preferred."""
     bundle = load_model()
     if not bundle or not bundle.get('model'):
         return None
@@ -301,19 +361,16 @@ def predict(frames, signs: list[dict], min_proba: float = 0.72) -> dict | None:
         }
 
     n = arr.shape[0]
-    windows: list[tuple[str, float, np.ndarray]] = [
-        ('full', 1.20, arr),
-    ]
-    if n >= 16:
-        windows.append(('body', 1.05, arr[max(0, n // 8):]))
-    if n >= 24:
-        windows.append(('tail', 0.75, arr[-max(10, n // 3):]))
+    windows: list[tuple[str, float, np.ndarray]] = [('full', 1.25, arr)]
+    if n >= 18:
+        windows.append(('body', 1.05, arr[max(0, n // 10):]))
+    # Avoid short-tail stealing first beat of a two-part sign
 
     scores: dict[int, float] = {}
     best_by_id: dict[int, dict] = {}
     for kind, weight, win in windows:
         ranked = _score_window(model, win, ready, classes)
-        for row in ranked[:4]:
+        for row in ranked[:3]:
             cid = row['id']
             val = row['proba'] * weight
             if val > scores.get(cid, -1):
@@ -339,44 +396,41 @@ def predict(frames, signs: list[dict], min_proba: float = 0.72) -> dict | None:
     }
 
     n_classes = len(ready)
-    # Single-class models are biased — demand near-certainty + clear motion
+    peaks = int(gate.get('peaks') or 0)
+    # Two-beat clips can score a bit lower raw proba — allow slight ease when peaks>=2
     if n_classes == 1:
-        need = 0.88
+        need = 0.82 if peaks >= 2 else 0.88
         need_margin = 0.0
     elif n_classes <= 3:
-        need = max(min_proba, 0.75)
-        need_margin = 0.18
+        need = 0.70 if peaks >= 2 else max(min_proba, 0.74)
+        need_margin = 0.14 if peaks >= 2 else 0.18
     else:
-        need = max(min_proba, 0.70)
-        need_margin = 0.14
+        need = 0.66 if peaks >= 2 else max(min_proba, 0.70)
+        need_margin = 0.12 if peaks >= 2 else 0.15
 
-    # Never accept tail-only as decisive
-    if best.get('window') == 'tail' and full_ranked:
-        full_best = full_ranked[0]
-        best = {
-            **full_best,
-            'window': 'full',
-            'weighted': full_best['proba'] * 1.20,
-        }
-        second = full_ranked[1] if len(full_ranked) > 1 else None
-        margin = best['proba'] - (second['proba'] if second else 0.0)
-
-    # Full window must also be confident
     if full_ranked and full_ranked[0]['id'] == best['id']:
-        if full_ranked[0]['proba'] < need - 0.05:
-            return {'match': None, 'peek': peek, 'ranked': full_ranked[:3], 'engine': 'ml', 'reason': 'low_full'}
+        if full_ranked[0]['proba'] < need - 0.06:
+            return {
+                'match': None,
+                'peek': peek,
+                'ranked': full_ranked[:3],
+                'engine': 'ml',
+                'reason': 'low_full',
+                'motion': gate,
+            }
 
     if best['proba'] >= need and margin >= need_margin:
         return {
             'match': {
                 'id': best['id'],
                 'name': best['name'],
-                'similarity': max(int(best['similarity']), 70),
+                'similarity': max(int(best['similarity']), 72),
                 'd': float(1.0 - best['proba']),
                 'n': best['n'],
                 'margin': round(float(margin), 4),
                 'engine': 'ml',
                 'window': best.get('window', 'full'),
+                'peaks': peaks,
             },
             'peek': peek,
             'ranked': full_ranked[:3],
@@ -384,4 +438,11 @@ def predict(frames, signs: list[dict], min_proba: float = 0.72) -> dict | None:
             'motion': gate,
         }
 
-    return {'match': None, 'peek': peek, 'ranked': full_ranked[:3], 'engine': 'ml', 'reason': 'low_conf'}
+    return {
+        'match': None,
+        'peek': peek,
+        'ranked': full_ranked[:3],
+        'engine': 'ml',
+        'reason': 'low_conf',
+        'motion': gate,
+    }
