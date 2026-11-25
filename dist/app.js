@@ -35,17 +35,16 @@ let verifyTarget = null;
 let verifyFailAt = 0;
 let recognizing = false;
 let lastRecognizeAt = 0;
-const SAME_SIGN_COOLDOWN_MS = 1800;
-/** Live two-beat gestures: wait for parts, then settle → fast speak. */
-const LIVE_BUFFER_MS = 4800;
-const GESTURE_SETTLE_MS = 420;       // after 2nd beat, confirm quickly
-const GESTURE_SETTLE_1BEAT_MS = 700; // single-beat signs need longer settle
-const MIN_GESTURE_MS = 900;
-const MAX_GESTURE_MS = 5000;
-const MOTION_THRESH = 0.11;
-const MIN_MOTION_FRAMES = 6;
-const MIN_MOTION_SUM = 1.1;
-const MIN_MATCH_SCORE = 74;
+const SAME_SIGN_COOLDOWN_MS = 1600;
+/** Live: natural continuous gesture → short pause → recognize+speak. No forced part splits. */
+const LIVE_BUFFER_MS = 4500;
+const GESTURE_SETTLE_MS = 380;
+const MIN_GESTURE_MS = 700;
+const MAX_GESTURE_MS = 4800;
+const MOTION_THRESH = 0.09;
+const MIN_MOTION_FRAMES = 5;
+const MIN_MOTION_SUM = 0.85;
+const MIN_MATCH_SCORE = 72;
 let gestureArmed = false;
 let gestureStartAt = 0;
 let lastMotionAt = 0;
@@ -53,8 +52,6 @@ let lastFeatFrame = null;
 let softPeekAt = 0;
 let motionFrames = 0;
 let motionSum = 0;
-let livePeaks = 0;
-let peakActive = false;
 
 const video = $('video');
 const canvas = $('overlay');
@@ -279,15 +276,13 @@ function startVerify(id) {
   gestureArmed = false;
   motionFrames = 0;
   motionSum = 0;
-  livePeaks = 0;
-  peakActive = false;
   lastFeatFrame = null;
   $('trainer').close();
   view('live');
   const name = signs[id].name;
-  setVerifyBanner('waiting', `⏳ اختبار: «${name}» — حركة 1 ثم حركة 2 ثم توقف`);
+  setVerifyBanner('waiting', `⏳ اختبار: نفّذ «${name}» بشكل طبيعي ثم توقف لحظة`);
   $('result').textContent = 'اختبار التعرّف…';
-  $('result-note').textContent = `نفّذ «${name}» بجزئين واضحين — بعده نطق سريع ودقيق`;
+  $('result-note').textContent = `نفّذ «${name}» كإشارة واحدة متصلة — بدون تقطيع`;
   $('result-ring').textContent = '?';
   $('score').textContent = '—';
   $('meter-fill').style.width = '0%';
@@ -1118,8 +1113,6 @@ function loop(now) {
           gestureArmed = false;
           motionFrames = 0;
           motionSum = 0;
-          livePeaks = 0;
-          peakActive = false;
           lastFeatFrame = null;
           smoothHands = [];
           trails = [[], []];
@@ -1128,7 +1121,7 @@ function loop(now) {
         noHandAt = 0;
       }
 
-      // While recording: keep every detect. Live mode: ~20 fps features.
+      // While recording: keep every detect. Live: natural continuous gesture.
       const sampleEvery = recording ? 0 : 40;
       if (now - lastFeature >= sampleEvery) {
         lastFeature = now;
@@ -1158,34 +1151,25 @@ function loop(now) {
                 gestureStartAt = now;
                 motionFrames = 0;
                 motionSum = 0;
-                livePeaks = 0;
-                peakActive = false;
                 if (!verifyTarget) {
-                  $('result-note').textContent = 'التقاط… الجزء 1 ثم الجزء 2';
+                  $('result-note').textContent = 'جاري التقاط الإشارة…';
                   $('result-ring').textContent = '…';
                 }
-              }
-              if (!peakActive) {
-                livePeaks += 1;
-                peakActive = true;
               }
               motionFrames += 1;
               motionSum += motion;
               lastMotionAt = now;
-            } else if (peakActive && motion < MOTION_THRESH * 0.45) {
-              peakActive = false; // valley between beats
             }
 
             const gestureMs = gestureArmed ? (now - gestureStartAt) : 0;
 
-            if (gestureArmed && gestureMs >= 900 && motionFrames < 3 && (now - lastMotionAt) > 400) {
+            // Cancel accidental micro-sway
+            if (gestureArmed && gestureMs >= 800 && motionFrames < 3 && (now - lastMotionAt) > 380) {
               gestureArmed = false;
               motionFrames = 0;
               motionSum = 0;
-              livePeaks = 0;
-              peakActive = false;
               if (!verifyTarget && !current) {
-                $('result-note').textContent = 'بانتظار إشارة واضحة — حركتان ثم توقف';
+                $('result-note').textContent = 'بانتظار إشارتك';
                 $('result-ring').textContent = '○';
               }
             }
@@ -1194,41 +1178,32 @@ function loop(now) {
               gestureArmed = false;
               motionFrames = 0;
               motionSum = 0;
-              livePeaks = 0;
-              peakActive = false;
             }
 
             const strongEnough = motionFrames >= MIN_MOTION_FRAMES && motionSum >= MIN_MOTION_SUM;
-            const settleNeed = livePeaks >= 2 ? GESTURE_SETTLE_MS : GESTURE_SETTLE_1BEAT_MS;
+            // Natural: finish the whole sign in one go, pause briefly → recognize
             const settled = gestureArmed
               && strongEnough
-              && livePeaks >= 1
-              && (now - lastMotionAt) >= settleNeed
+              && (now - lastMotionAt) >= GESTURE_SETTLE_MS
               && gestureMs >= MIN_GESTURE_MS
-              && buffer.length >= 12;
+              && buffer.length >= 10;
 
-            if (settled && !recognizing && now - lastRecognizeAt > 350) {
+            if (settled && !recognizing && now - lastRecognizeAt > 280) {
               lastRecognizeAt = now;
-              const clip = buffer.filter((x) => x.t >= gestureStartAt - 60);
-              const frames = (clip.length >= 12 ? clip : buffer).map((x) => x.f);
+              const clip = buffer.filter((x) => x.t >= gestureStartAt - 80);
+              const frames = (clip.length >= 10 ? clip : buffer).map((x) => x.f);
               const step = Math.max(1, Math.ceil(frames.length / 72));
               const payload = frames.filter((_, i) => i % step === 0);
 
-              const usedMotionFrames = motionFrames;
-              const usedMotionSum = motionSum;
-              const usedPeaks = livePeaks;
               gestureArmed = false;
               motionFrames = 0;
               motionSum = 0;
-              livePeaks = 0;
-              peakActive = false;
 
               const applyResult = (match, peek, reason) => {
-                // Never promote peeks — idle standing often gets a soft "peek"
                 if (!match) {
                   if (reason === 'idle') {
                     if (!verifyTarget) {
-                      $('result-note').textContent = 'ما في إشارة واضحة — أنت واقف أو الحركة ضعيفة';
+                      $('result-note').textContent = 'بانتظار إشارتك';
                       $('result-ring').textContent = '○';
                       $('score').textContent = '—';
                       $('meter-fill').style.width = '0%';
@@ -1239,17 +1214,17 @@ function loop(now) {
                     $('result').textContent = peek.name;
                     $('score').textContent = peek.similarity + '%';
                     $('meter-fill').style.width = Math.max(8, peek.similarity) + '%';
-                    $('result-note').textContent = `غير مؤكد («${peek.name}» ${peek.similarity}%) — أعد الإشارة أوضح`;
+                    $('result-note').textContent = `قريب من «${peek.name}» — أعد الإشارة أوضح`;
                     $('result-ring').textContent = '…';
                   } else if (!verifyTarget) {
-                    $('result-note').textContent = 'لم يُعتمد — نفّذ الإشارة بوضوح ثم توقف لحظة';
+                    $('result-note').textContent = 'بانتظار إشارتك';
                     $('result-ring').textContent = '○';
                   }
                   return;
                 }
 
                 if ((match.similarity || 0) < MIN_MATCH_SCORE) {
-                  $('result-note').textContent = `ثقة منخفضة (${match.similarity}%) — لم يُنطق. أعد الحركة أوضح`;
+                  $('result-note').textContent = `غير مؤكد (${match.similarity}%) — أعد الإشارة`;
                   $('result-ring').textContent = '…';
                   $('score').textContent = match.similarity + '%';
                   return;
@@ -1264,13 +1239,13 @@ function loop(now) {
                 recognized(match);
                 latched = match.id;
                 latchedAt = nowMs;
-                buffer = buffer.filter((x) => nowMs - x.t < 500);
+                buffer = buffer.filter((x) => nowMs - x.t < 450);
                 lastFeatFrame = null;
               };
 
               if (flaskMode) {
                 recognizing = true;
-                $('result-note').textContent = `تحليل سريع… ${usedPeaks} جزء · ثقة عالية`;
+                $('result-note').textContent = 'تعرّف…';
                 api.recognize(payload).then((res) => {
                   recognizing = false;
                   applyResult(res.match, res.peek, res.reason);
@@ -1280,20 +1255,17 @@ function loop(now) {
                 });
               } else {
                 const windows = buildWindows(buffer);
-                const match = classify(windows, signs);
-                const peek = peekMatch(windows, signs);
-                applyResult(match, peek);
+                applyResult(classify(windows, signs), peekMatch(windows, signs));
               }
-            } else if (gestureArmed && strongEnough && gestureMs >= 500 && now - softPeekAt > 280) {
+            } else if (gestureArmed && strongEnough && gestureMs >= 400 && now - softPeekAt > 350) {
               softPeekAt = now;
               if (!verifyTarget) {
-                const partLabel = livePeaks >= 2 ? '✓ جزآن' : (livePeaks === 1 ? 'الجزء 1… أنهِ الجزء 2' : 'ابدأ الحركة');
-                $('result-note').textContent = `${partLabel} · ${(gestureMs / 1000).toFixed(1)} ث`;
+                $('result-note').textContent = 'جاري التقاط الإشارة…';
               }
-            } else if (!gestureArmed && !recognizing && !verifyTarget && now - softPeekAt > 2000) {
+            } else if (!gestureArmed && !recognizing && !verifyTarget && now - softPeekAt > 2500) {
               softPeekAt = now;
               if (!current) {
-                $('result-note').textContent = 'بانتظار إشارة — حركتان باليد ثم توقف للنطق';
+                $('result-note').textContent = 'بانتظار إشارتك';
               }
             }
           }
