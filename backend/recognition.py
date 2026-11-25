@@ -54,6 +54,9 @@ def trim_idle(frames: np.ndarray, thresh: float = 0.035) -> np.ndarray:
     motion = np.zeros(frames.shape[0])
     for i in range(1, frames.shape[0]):
         motion[i] = frame_distance(frames[i], frames[i - 1])
+    # Static held poses (e.g. مرحبًا) have almost no temporal motion — keep full clip
+    if float(motion.mean()) < thresh * 0.55 and float(motion.max()) < thresh * 1.2:
+        return frames
     start, end = 0, frames.shape[0] - 1
     while start < end - 2 and motion[start] < thresh:
         start += 1

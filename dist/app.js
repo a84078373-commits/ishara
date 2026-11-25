@@ -1453,27 +1453,35 @@ $('record').onclick = async () => {
         step: `استعد… ${i}`,
         hand: '✓ اليد ظاهرة',
         handOk: true,
-        hint: 'بعد العد نفّذ الإشارة كاملة بشكل طبيعي مرة واحدة',
-        progress: 15 + (3 - i) * 10,
+      hint: 'ثبّت الإشارة أو حرّكها — الوضعية الثابتة مقبولة',
+      progress: 15 + (3 - i) * 10,
       });
-      showTrainResult(false, `${i}`, `سجّل «${word}» كإشارة واحدة متصلة`);
+      showTrainResult(false, `${i}`, `سجّل «${word}» (ثابتة أو متحركة)`);
       await wait(650);
       if (!running || session !== token) throw Error('تم إلغاء التسجيل بعد إيقاف الكاميرا.');
     }
 
-    // Continuous landmark capture (MediaPipe joints) — no forced steps
+    // Continuous landmark capture — moving OR static held pose (e.g. مرحبًا)
     capture = [];
-    const captureMs = 4200;
-    const minCaptureMs = 1600;
+    const captureMs = 3600;
+    const minCaptureMs = 1100;
     const started = performance.now();
     let motionSeen = 0;
+    let visibleSeen = 0;
     let lastTrainMotionAt = started;
+    let lastVisibleAt = 0;
     $('recording').textContent = '●';
 
     while (true) {
       if (!running || session !== token) throw Error('تم إلغاء التسجيل.');
       const elapsed = performance.now() - started;
       if (elapsed >= captureMs) break;
+
+      const last = capture[capture.length - 1];
+      if (last?.visible) {
+        visibleSeen += 1;
+        lastVisibleAt = performance.now();
+      }
 
       if (capture.length >= 2) {
         const a = capture[capture.length - 2].f;
@@ -1490,26 +1498,35 @@ $('record').onclick = async () => {
         }
       }
 
-      // Auto-stop: enough joint motion then natural pause (like global isolated-sign capture)
+      const quiet = performance.now() - lastTrainMotionAt;
+      // Moving sign: motion then pause → stop early
+      if (elapsed >= minCaptureMs && motionSeen >= 4 && quiet >= 450) {
+        break;
+      }
+      // Static held pose: hand visible long enough and still → stop
       if (
         elapsed >= minCaptureMs
-        && motionSeen >= 5
-        && (performance.now() - lastTrainMotionAt) >= 550
+        && motionSeen < 4
+        && visibleSeen >= 16
+        && lastVisibleAt
+        && (performance.now() - lastVisibleAt) < 250
+        && quiet >= 700
       ) {
         break;
       }
 
       const liveVisible = $('hands').textContent.includes('ظاهرة');
       const secLeft = Math.max(0, ((captureMs - elapsed) / 1000)).toFixed(1);
+      const modeHint = motionSeen >= 3 ? 'إشارة متحركة' : 'وضعية ثابتة أو حركة';
       setCoach({
         title: `تدريب «${word}» · مثال ${takeNum}`,
-        step: '● تتبّع المفاصل — نفّذ الإشارة كاملة',
+        step: `● ${modeHint}`,
         hand: liveVisible
           ? `✓ هيكل اليد · ${capture.length} إطار`
           : '⚠ أظهر اليد داخل الإطار',
         handOk: liveVisible,
         hint: liveVisible
-          ? `سجّل الإشارة مرة واحدة بطبيعتها (${secLeft} ث)`
+          ? `أظهر اليد بوضوح (${secLeft} ث) — الثابت مقبول`
           : 'اليد اختفت — أرجعها',
         progress: 45 + Math.min(50, (elapsed / captureMs) * 50),
       });
@@ -1523,14 +1540,15 @@ $('record').onclick = async () => {
     if (capture.length < 3 && frames.length < 3) {
       throw Error(`ما انحفظت إطارات كافية (${capture.length}). انتظر ✓ جاهز للمتتبّع، وخلّ اليد ظاهرة.`);
     }
-    if (frames.length < 8) {
-      throw Error(`الإشارة قصيرة جدًا (${frames.length} إطار). نفّذ الإشارة كاملة بوضوح.`);
+    if (frames.length < 6) {
+      throw Error(`اليد لم تظهر كفاية (${frames.length} إطار). أظهر اليد وثبّتها أو حرّكها.`);
     }
     if (capture.length >= 8 && ratio < 0.2) {
       throw Error('اليد اختفت معظم الوقت. أعد التسجيل وخلّها داخل الإطار.');
     }
-    if (motionSeen < 3) {
-      throw Error('ما انرصدت حركة كافية للمفاصل. أعد التسجيل ونفّذ الإشارة بوضوح.');
+    // Static poses (مرحبًا…) are valid — only reject if hand barely seen
+    if (motionSeen < 2 && frames.length < 10) {
+      throw Error('أظهر اليد أوضح وثبّت الإشارة ثانية كاملة على الأقل.');
     }
 
     let q = Math.max(qualityScore(frames), 35);

@@ -215,10 +215,12 @@ def add_sample(sign_id: int, frames: list) -> dict:
 
     analysis = ml_model.analyze_gesture(frames)
     if not analysis.get('ok'):
-        raise ValueError('الحركة ضعيفة أو غير واضحة — نفّذ الإشارة كاملة بوضوح مرة واحدة')
+        raise ValueError('اليد غير واضحة — أظهر اليد داخل الإطار وثبّت الإشارة أو حرّكها بوضوح')
 
     q = quality_score(frames)
-    # Richer joint motion → higher quality score
+    # Moving signs score higher; static held poses still get a fair baseline
+    if analysis.get('static'):
+        q = max(q, 62)
     if float(analysis.get('mean') or 0) >= 0.04:
         q = max(q, 72)
     if int(analysis.get('peaks') or 0) >= 2:

@@ -69,22 +69,43 @@ def count_motion_peaks(motion: np.ndarray, thresh: float = 0.04) -> int:
 
 
 def analyze_gesture(frames) -> dict:
-    """Peak / energy stats used by training QA and idle rejection."""
+    """Peak / energy stats used by training QA and idle rejection.
+
+    Accepts both moving signs and static held poses (handshape only).
+    """
     arr = np.asarray(frames, dtype=np.float64)
     if arr.ndim != 2 or arr.shape[0] < 4:
-        return {'peaks': 0, 'mean': 0.0, 'max': 0.0, 'ok': False, 'split': 0}
+        return {'peaks': 0, 'mean': 0.0, 'max': 0.0, 'ok': False, 'split': 0, 'static': False}
+    present = arr[(arr[:, 0] > 0) | (arr[:, 76] > 0)] if arr.shape[1] > 76 else arr
+    presence = float(len(present) / max(1, arr.shape[0]))
+    pose_spread = 0.0
+    if present.shape[0] >= 1:
+        mid = present[present.shape[0] // 2]
+        # Spatial richness of the held handshape (zeros = no hand)
+        pose_spread = float(np.std(mid[1:64])) if mid.shape[0] > 64 else float(np.std(mid))
+
     trimmed = trim_idle(arr)
     motion = motion_profile(trimmed)
     peaks = int(count_motion_peaks(motion))
     mean = float(motion.mean()) if motion.size else 0.0
     mx = float(motion.max()) if motion.size else 0.0
     split = _best_split(motion)
-    ok = mean >= 0.018 and mx >= 0.048 and peaks >= 1 and trimmed.shape[0] >= 5
+    motion_ok = mean >= 0.018 and mx >= 0.048 and peaks >= 1 and trimmed.shape[0] >= 5
+    # Static OK: hand clearly visible long enough with a real handshape
+    static_ok = (
+        present.shape[0] >= 8
+        and presence >= 0.45
+        and pose_spread >= 0.12
+    )
+    ok = motion_ok or static_ok
     return {
         'peaks': peaks,
         'mean': mean,
         'max': mx,
         'ok': ok,
+        'static': bool(static_ok and not motion_ok),
+        'presence': round(presence, 3),
+        'poseSpread': round(pose_spread, 4),
         'split': int(split),
         'frames': int(trimmed.shape[0]),
     }
@@ -300,6 +321,9 @@ def _classes_of(model) -> list[int]:
 
 def is_intentional_gesture(frames, min_mean: float = 0.024, min_peaks: int = 1, min_max: float = 0.06) -> dict:
     info = analyze_gesture(frames)
+    # Static held poses already marked ok by analyze_gesture — accept them
+    if info.get('ok') and info.get('static'):
+        return {**info, 'ok': True, 'reason': 'static'}
     ok = (
         info['ok']
         and info['mean'] >= min_mean
