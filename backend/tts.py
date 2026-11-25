@@ -1,8 +1,9 @@
-"""TTS — generate once, cache on disk.
+"""TTS — generate once per word at training, cache mp3 on disk.
 
 Providers (in order):
-1) ElevenLabs (if key works)
-2) Microsoft Edge neural voices via edge-tts (free, good Arabic)
+1) OpenAI TTS (if OPENAI_API_KEY set)
+2) ElevenLabs (if key works)
+3) Microsoft Edge neural Arabic via edge-tts (free fallback)
 """
 from __future__ import annotations
 
@@ -13,9 +14,15 @@ from pathlib import Path
 
 import requests
 
-from .config import AUDIO_DIR, ELEVEN_API_KEY, ELEVEN_VOICE_ID
+from .config import (
+    AUDIO_DIR,
+    ELEVEN_API_KEY,
+    ELEVEN_VOICE_ID,
+    OPENAI_API_KEY,
+    OPENAI_TTS_MODEL,
+    OPENAI_TTS_VOICE,
+)
 
-# High-quality Arabic neural voices (Microsoft)
 EDGE_VOICE = os.getenv('EDGE_TTS_VOICE', 'ar-SA-ZariyahNeural')
 
 
@@ -32,6 +39,46 @@ def has_clip(sign_id: int, text: str) -> bool:
 def clip_path(sign_id: int, text: str) -> Path | None:
     path = _safe_name(sign_id, text)
     return path if path.exists() and path.stat().st_size > 0 else None
+
+
+def _openai_generate(text: str, path: Path) -> None:
+    if not OPENAI_API_KEY:
+        raise RuntimeError('مفتاح OpenAI غير مضبوط')
+
+    # gpt-4o-mini-tts is best; fall back to tts-1 if model rejected
+    models = [OPENAI_TTS_MODEL, 'tts-1', 'gpt-4o-mini-tts']
+    seen = set()
+    last_err = ''
+    for model in models:
+        if model in seen:
+            continue
+        seen.add(model)
+        res = requests.post(
+            'https://api.openai.com/v1/audio/speech',
+            headers={
+                'Authorization': f'Bearer {OPENAI_API_KEY}',
+                'Content-Type': 'application/json',
+            },
+            json={
+                'model': model,
+                'voice': OPENAI_TTS_VOICE or 'nova',
+                'input': text,
+                'response_format': 'mp3',
+            },
+            timeout=90,
+        )
+        if res.ok and res.content:
+            path.write_bytes(res.content)
+            return
+        try:
+            last_err = res.json().get('error', {}).get('message') or res.text[:160]
+        except Exception:
+            last_err = f'HTTP {res.status_code}'
+        if res.status_code in (401, 403):
+            raise RuntimeError(f'OpenAI: مفتاح مرفوض — {last_err}')
+        if res.status_code == 429:
+            raise RuntimeError('OpenAI: تجاوزت الحد أو لا رصيد')
+    raise RuntimeError(f'فشل OpenAI TTS — {last_err}')
 
 
 def _elevenlabs_generate(text: str, path: Path) -> None:
@@ -91,7 +138,7 @@ def _edge_generate(text: str, path: Path) -> None:
 
 
 def ensure_clip(sign_id: int, text: str, force: bool = False) -> tuple[Path, bool]:
-    """Generate mp3 once and cache. Prefer ElevenLabs, else free Edge TTS."""
+    """Generate mp3 once at train time and cache for instant live speak."""
     text = (text or '').strip()
     if not text:
         raise ValueError('لا توجد كلمة لتوليد الصوت')
@@ -101,30 +148,38 @@ def ensure_clip(sign_id: int, text: str, force: bool = False) -> tuple[Path, boo
 
     errors: list[str] = []
 
-    # 1) ElevenLabs if key present
+    def _clean_bad():
+        if path.exists() and path.stat().st_size <= 0:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+    # 1) OpenAI
+    if OPENAI_API_KEY:
+        try:
+            _openai_generate(text, path)
+            return path, False
+        except Exception as e:
+            errors.append(str(e))
+            _clean_bad()
+
+    # 2) ElevenLabs
     if ELEVEN_API_KEY:
         try:
             _elevenlabs_generate(text, path)
             return path, False
         except Exception as e:
             errors.append(str(e))
-            if path.exists() and path.stat().st_size <= 0:
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
+            _clean_bad()
 
-    # 2) Free Microsoft neural Arabic (edge-tts)
+    # 3) Free Microsoft Edge TTS
     try:
         _edge_generate(text, path)
         return path, False
     except Exception as e:
         errors.append(str(e))
-        if path.exists() and path.stat().st_size <= 0:
-            try:
-                path.unlink()
-            except OSError:
-                pass
+        _clean_bad()
 
     raise RuntimeError('تعذّر توليد الصوت: ' + ' | '.join(errors))
 

@@ -214,8 +214,8 @@
     <h2>إعدادات الصوت</h2>
     <button id="close-voice" aria-label="إغلاق">×</button>
   </div>
-  <p>يُولَّد مقطع الصوت <b>مرة واحدة</b> لكل كلمة ويُحفظ، ثم يُشغَّل محليًا عند التعرّف.</p>
-  <p class="notice">الافتراضي الآن: صوت Microsoft العربي المجاني (edge-tts). ElevenLabs اختياري إن كان الاشتراك فعّالًا.</p>
+  <p>عند تدريب إشارة يُولَّد مقطع الصوت <b>مرة واحدة</b> ويُحفظ، ثم يُشغَّل فور التعرّف.</p>
+  <p class="notice">الترتيب: OpenAI TTS → ElevenLabs → Microsoft المجاني. الأفضل ضبط <code>OPENAI_API_KEY</code> في السيرفر أو local-config.</p>
   <label class="field">مفتاح ElevenLabs (اختياري)
     <input id="eleven-key" type="password" autocomplete="off" placeholder="sk_... أو اتركه فارغًا">
   </label>

@@ -445,9 +445,9 @@ async function updateVoice() {
     if (current && readyAudio.has(current.id)) {
       el.textContent = `نطق فوري · «${current.name}» محفوظ`;
     } else if (n) {
-      el.textContent = `${n} مقطع جاهز · Microsoft/Edge TTS أو ElevenLabs`;
+      el.textContent = `${n} مقطع جاهز · OpenAI/Edge · نطق فوري`;
     } else {
-      el.textContent = 'الصوت: Microsoft العربي المجاني (أو ElevenLabs إن فعّال) · يُحفظ مرة لكل كلمة';
+      el.textContent = 'الصوت يُحفظ مرة عند التدريب (OpenAI → ElevenLabs → Microsoft)';
     }
     return;
   }

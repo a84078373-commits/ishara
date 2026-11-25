@@ -34,13 +34,27 @@ DEFAULT_WORDS = [
 
 ELEVEN_API_KEY = os.getenv('ELEVEN_API_KEY', '')
 ELEVEN_VOICE_ID = os.getenv('ELEVEN_VOICE_ID', 'aMmeBf0lzDYlouyfqNjh')
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
+OPENAI_TTS_VOICE = os.getenv('OPENAI_TTS_VOICE', 'nova')
+OPENAI_TTS_MODEL = os.getenv('OPENAI_TTS_MODEL', 'gpt-4o-mini-tts')
 
-# Load from dist/local-config.js if env empty
+# local-config.js overrides empty/env for local secrets (gitignored)
 _local = DIST_DIR / 'local-config.js'
-if (not ELEVEN_API_KEY) and _local.exists():
+if _local.exists():
     text = _local.read_text(encoding='utf-8')
     for line in text.splitlines():
-        if 'ELEVEN_API_KEY' in line and "'" in line:
-            ELEVEN_API_KEY = line.split("'")[1]
-        if 'ELEVEN_VOICE_ID' in line and "'" in line:
-            ELEVEN_VOICE_ID = line.split("'")[1]
+        if "'" not in line:
+            continue
+        val = line.split("'")[1].strip()
+        if not val:
+            continue
+        if 'OPENAI_API_KEY' in line:
+            OPENAI_API_KEY = val
+        elif 'OPENAI_TTS_VOICE' in line:
+            OPENAI_TTS_VOICE = val
+        elif 'ELEVEN_API_KEY' in line:
+            ELEVEN_API_KEY = val
+        elif 'ELEVEN_VOICE_ID' in line:
+            ELEVEN_VOICE_ID = val
+
+
