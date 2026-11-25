@@ -460,16 +460,25 @@ async function updateVoice() {
 }
 
 function speakBrowser(text) {
-  if (!window.speechSynthesis) return toast('النطق غير مدعوم في هذا المتصفح');
-  const v = browserVoice();
-  if (!v) return toast('أضف صوتًا عربيًا للجهاز أو اضبط ElevenLabs.');
+  if (!window.speechSynthesis) {
+    toast('النطق غير مدعوم في هذا المتصفح');
+    return;
+  }
   speechSynthesis.cancel();
+  const voices = speechSynthesis.getVoices() || [];
+  const v = voices.find((x) => x.lang?.toLowerCase().startsWith('ar'))
+    || voices.find((x) => /arab/i.test(x.name || ''))
+    || browserVoice()
+    || voices[0];
   const u = new SpeechSynthesisUtterance(text);
-  u.lang = v.lang;
-  u.voice = v;
-  u.rate = 0.95;
-  u.onerror = () => toast('تعذّر تشغيل الصوت الاحتياطي.');
+  u.lang = v?.lang || 'ar-SA';
+  if (v) u.voice = v;
+  u.rate = 0.92;
+  u.volume = 1;
+  u.onerror = () => toast('تعذّر تشغيل الصوت. تحقق من ElevenLabs أو صوت عربي في النظام.');
   speechSynthesis.speak(u);
+  const st = $('voice-status');
+  if (st) st.textContent = v ? `نطق احتياطي · ${v.name}` : 'نطق احتياطي للمتصفح';
 }
 
 let serverAudio = null;
@@ -632,7 +641,12 @@ async function cacheVoiceForSign(sign) {
       return true;
     }
   } catch (e) {
-    console.warn('voice cache', e);
+    const msg = e?.message || String(e);
+    console.warn('voice cache', msg);
+    const st = $('voice-status');
+    if (st) st.textContent = 'ElevenLabs: ' + msg;
+    // Don't spam toast on every frame — only when user trains/adds
+    return false;
   }
   return false;
 }

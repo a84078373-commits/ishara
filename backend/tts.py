@@ -51,7 +51,16 @@ def ensure_clip(sign_id: int, text: str, force: bool = False) -> tuple[Path, boo
         timeout=60,
     )
     if res.status_code == 401:
-        raise RuntimeError('مفتاح ElevenLabs غير صالح')
+        detail = ''
+        try:
+            detail = (res.json().get('detail') or {})
+            if isinstance(detail, dict):
+                detail = detail.get('message') or detail.get('code') or ''
+        except Exception:
+            detail = (res.text or '')[:160]
+        if 'payment' in str(detail).lower():
+            raise RuntimeError('ElevenLabs: مشكلة دفع في الاشتراك — أكمل الفاتورة من لوحة ElevenLabs')
+        raise RuntimeError('مفتاح ElevenLabs غير صالح أو مرفوض')
     if res.status_code == 429:
         raise RuntimeError('تجاوزت حد ElevenLabs')
     if not res.ok:
