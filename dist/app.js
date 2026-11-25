@@ -1497,7 +1497,7 @@ $('record').onclick = async () => {
       step: `✓ تم حفظ المثال ${count}`,
       hand: `جودة ${q}% · ${peaksNote} · ${frames.length} إطار`,
       handOk: true,
-      hint: ready ? 'الآن نفّذ الإشارة (جزآن) للتعرّف السريع' : `سجّل مثال ${count + 1} بنفس الأسلوب`,
+      hint: ready ? 'الآن نفّذ الإشارة بشكل طبيعي للتعرّف' : `سجّل مثال ${count + 1} بنفس الأسلوب`,
       progress: 100,
     });
     showTrainResult(
@@ -1515,8 +1515,8 @@ $('record').onclick = async () => {
     } else {
       toast(
         ready
-          ? `✓ «${word}» جاهزة (جزآن). نفّذها الآن للنطق السريع.`
-          : `✓ مثال ${count} بجزئين. بقي ${MIN_SAMPLES - count}.`,
+          ? `✓ «${word}» جاهزة. نفّذها بشكل طبيعي الآن.`
+          : `✓ مثال ${count} محفوظ. بقي ${MIN_SAMPLES - count}.`,
       );
     }
 
