@@ -1,12 +1,22 @@
-"""ElevenLabs TTS — generate once, cache on disk."""
+"""TTS — generate once, cache on disk.
+
+Providers (in order):
+1) ElevenLabs (if key works)
+2) Microsoft Edge neural voices via edge-tts (free, good Arabic)
+"""
 from __future__ import annotations
 
+import asyncio
+import os
 import re
 from pathlib import Path
 
 import requests
 
 from .config import AUDIO_DIR, ELEVEN_API_KEY, ELEVEN_VOICE_ID
+
+# High-quality Arabic neural voices (Microsoft)
+EDGE_VOICE = os.getenv('EDGE_TTS_VOICE', 'ar-SA-ZariyahNeural')
 
 
 def _safe_name(sign_id: int, text: str) -> Path:
@@ -24,14 +34,7 @@ def clip_path(sign_id: int, text: str) -> Path | None:
     return path if path.exists() and path.stat().st_size > 0 else None
 
 
-def ensure_clip(sign_id: int, text: str, force: bool = False) -> tuple[Path, bool]:
-    text = (text or '').strip()
-    if not text:
-        raise ValueError('لا توجد كلمة لتوليد الصوت')
-    path = _safe_name(sign_id, text)
-    if path.exists() and path.stat().st_size > 0 and not force:
-        return path, True
-
+def _elevenlabs_generate(text: str, path: Path) -> None:
     if not ELEVEN_API_KEY:
         raise RuntimeError('مفتاح ElevenLabs غير مضبوط')
 
@@ -53,22 +56,77 @@ def ensure_clip(sign_id: int, text: str, force: bool = False) -> tuple[Path, boo
     if res.status_code == 401:
         detail = ''
         try:
-            detail = (res.json().get('detail') or {})
-            if isinstance(detail, dict):
-                detail = detail.get('message') or detail.get('code') or ''
+            raw = res.json().get('detail') or {}
+            if isinstance(raw, dict):
+                detail = raw.get('message') or raw.get('code') or ''
+            else:
+                detail = str(raw)
         except Exception:
             detail = (res.text or '')[:160]
         if 'payment' in str(detail).lower():
-            raise RuntimeError('ElevenLabs: مشكلة دفع في الاشتراك — أكمل الفاتورة من لوحة ElevenLabs')
+            raise RuntimeError('ElevenLabs: مشكلة دفع في الاشتراك')
         raise RuntimeError('مفتاح ElevenLabs غير صالح أو مرفوض')
     if res.status_code == 429:
         raise RuntimeError('تجاوزت حد ElevenLabs')
     if not res.ok:
-        raise RuntimeError(f'فشل توليد الصوت ({res.status_code})')
+        raise RuntimeError(f'فشل ElevenLabs ({res.status_code})')
     if not res.content:
-        raise RuntimeError('ملف الصوت فارغ')
+        raise RuntimeError('ملف الصوت فارغ من ElevenLabs')
     path.write_bytes(res.content)
-    return path, False
+
+
+def _edge_generate(text: str, path: Path) -> None:
+    try:
+        import edge_tts
+    except ImportError as e:
+        raise RuntimeError('edge-tts غير مثبت — pip install edge-tts') from e
+
+    async def _run():
+        communicate = edge_tts.Communicate(text, EDGE_VOICE)
+        await communicate.save(str(path))
+
+    asyncio.run(_run())
+    if not path.exists() or path.stat().st_size <= 0:
+        raise RuntimeError('فشل توليد الصوت عبر Microsoft TTS')
+
+
+def ensure_clip(sign_id: int, text: str, force: bool = False) -> tuple[Path, bool]:
+    """Generate mp3 once and cache. Prefer ElevenLabs, else free Edge TTS."""
+    text = (text or '').strip()
+    if not text:
+        raise ValueError('لا توجد كلمة لتوليد الصوت')
+    path = _safe_name(sign_id, text)
+    if path.exists() and path.stat().st_size > 0 and not force:
+        return path, True
+
+    errors: list[str] = []
+
+    # 1) ElevenLabs if key present
+    if ELEVEN_API_KEY:
+        try:
+            _elevenlabs_generate(text, path)
+            return path, False
+        except Exception as e:
+            errors.append(str(e))
+            if path.exists() and path.stat().st_size <= 0:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+    # 2) Free Microsoft neural Arabic (edge-tts)
+    try:
+        _edge_generate(text, path)
+        return path, False
+    except Exception as e:
+        errors.append(str(e))
+        if path.exists() and path.stat().st_size <= 0:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+    raise RuntimeError('تعذّر توليد الصوت: ' + ' | '.join(errors))
 
 
 def delete_clip(sign_id: int, text: str) -> None:
@@ -88,7 +146,6 @@ def delete_clips_for_sign(sign_id: int) -> None:
 
 
 def rekey_clips(old_id: int, new_id: int) -> None:
-    """Rename cached clips when a sign id changes after delete/reindex."""
     if old_id == new_id or not AUDIO_DIR.exists():
         return
     for old in list(AUDIO_DIR.glob(f'{old_id}_*.mp3')):

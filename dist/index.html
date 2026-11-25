@@ -211,17 +211,17 @@
 
 <dialog id="voice-dialog">
   <div class="dialog-top">
-    <h2>صوت ElevenLabs</h2>
+    <h2>إعدادات الصوت</h2>
     <button id="close-voice" aria-label="إغلاق">×</button>
   </div>
-  <p>يُولَّد مقطع الصوت <b>مرة واحدة</b> لكل كلمة عند التدريب، ثم يُحفظ على جهازك ويُشغَّل محليًا عند التعرّف — بلا طلب جديد في كل مرة.</p>
-  <label class="field">مفتاح API
-    <input id="eleven-key" type="password" autocomplete="off" placeholder="sk_...">
+  <p>يُولَّد مقطع الصوت <b>مرة واحدة</b> لكل كلمة ويُحفظ، ثم يُشغَّل محليًا عند التعرّف.</p>
+  <p class="notice">الافتراضي الآن: صوت Microsoft العربي المجاني (edge-tts). ElevenLabs اختياري إن كان الاشتراك فعّالًا.</p>
+  <label class="field">مفتاح ElevenLabs (اختياري)
+    <input id="eleven-key" type="password" autocomplete="off" placeholder="sk_... أو اتركه فارغًا">
   </label>
-  <label class="field">معرّف الصوت (Voice ID)
+  <label class="field">معرّف صوت ElevenLabs
     <input id="eleven-voice" maxlength="80" placeholder="aMmeBf0lzDYlouyfqNjh">
   </label>
-  <p class="notice">المفتاح يبقى في متصفحك فقط. إن ظهر المفتاح في محادثة أو مستودع عام، أعد إنشاؤه من لوحة ElevenLabs.</p>
   <button id="save-voice" class="primary">حفظ الإعدادات</button>
 </dialog>
 

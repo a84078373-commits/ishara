@@ -443,11 +443,11 @@ async function updateVoice() {
   if (flaskMode) {
     const n = readyAudio.size;
     if (current && readyAudio.has(current.id)) {
-      el.textContent = `نطق فوري · «${current.name}» محفوظ في الذاكرة`;
+      el.textContent = `نطق فوري · «${current.name}» محفوظ`;
     } else if (n) {
-      el.textContent = `${n} مقطع جاهز · النطق من الذاكرة بدون ElevenLabs`;
+      el.textContent = `${n} مقطع جاهز · Microsoft/Edge TTS أو ElevenLabs`;
     } else {
-      el.textContent = 'ElevenLabs يُستدعى مرة عند إضافة الكلمة فقط · ثم نطق فوري';
+      el.textContent = 'الصوت: Microsoft العربي المجاني (أو ElevenLabs إن فعّال) · يُحفظ مرة لكل كلمة';
     }
     return;
   }
