@@ -79,7 +79,7 @@ def analyze_gesture(frames) -> dict:
     mean = float(motion.mean()) if motion.size else 0.0
     mx = float(motion.max()) if motion.size else 0.0
     split = _best_split(motion)
-    ok = mean >= 0.022 and mx >= 0.055 and peaks >= 1 and trimmed.shape[0] >= 8
+    ok = mean >= 0.018 and mx >= 0.048 and peaks >= 1 and trimmed.shape[0] >= 5
     return {
         'peaks': peaks,
         'mean': mean,
@@ -331,7 +331,7 @@ def _score_window(model, frames, ready: dict, classes: list[int]) -> list[dict]:
 
 
 def predict(frames, signs: list[dict], min_proba: float = 0.68) -> dict | None:
-    """Fast + strict: idle rejected, two-beat full window preferred."""
+    """Single-pass ExtraTrees — optimized for instant live recognition."""
     bundle = load_model()
     if not bundle or not bundle.get('model'):
         return None
@@ -346,7 +346,7 @@ def predict(frames, signs: list[dict], min_proba: float = 0.68) -> dict | None:
         return None
 
     arr = np.asarray(frames, dtype=np.float64)
-    if arr.ndim != 2 or arr.shape[0] < 8:
+    if arr.ndim != 2 or arr.shape[0] < 5:
         return None
 
     gate = is_intentional_gesture(arr)
@@ -360,80 +360,48 @@ def predict(frames, signs: list[dict], min_proba: float = 0.68) -> dict | None:
             'motion': gate,
         }
 
-    n = arr.shape[0]
-    windows: list[tuple[str, float, np.ndarray]] = [('full', 1.25, arr)]
-    if n >= 18:
-        windows.append(('body', 1.05, arr[max(0, n // 10):]))
-    # Avoid short-tail stealing first beat of a two-part sign
-
-    scores: dict[int, float] = {}
-    best_by_id: dict[int, dict] = {}
-    for kind, weight, win in windows:
-        ranked = _score_window(model, win, ready, classes)
-        for row in ranked[:3]:
-            cid = row['id']
-            val = row['proba'] * weight
-            if val > scores.get(cid, -1):
-                scores[cid] = val
-                best_by_id[cid] = {**row, 'window': kind, 'weighted': val}
-
-    if not scores:
+    ranked = _score_window(model, arr, ready, classes)
+    if not ranked:
         return None
 
-    ordered = sorted(best_by_id.values(), key=lambda x: x['weighted'], reverse=True)
-    best = ordered[0]
-    second = ordered[1] if len(ordered) > 1 else None
-    margin = best['weighted'] - (second['weighted'] if second else 0.0)
-
-    full_ranked = _score_window(model, arr, ready, classes) or ordered
-    peek_src = full_ranked[0]
+    best = ranked[0]
+    second = ranked[1] if len(ranked) > 1 else None
+    margin = best['proba'] - (second['proba'] if second else 0.0)
     peek = {
-        'id': peek_src['id'],
-        'name': peek_src['name'],
-        'similarity': peek_src['similarity'],
-        'd': float(1.0 - peek_src['proba']),
-        'n': peek_src['n'],
+        'id': best['id'],
+        'name': best['name'],
+        'similarity': best['similarity'],
+        'd': float(1.0 - best['proba']),
+        'n': best['n'],
     }
 
     n_classes = len(ready)
     peaks = int(gate.get('peaks') or 0)
-    # Two-beat clips can score a bit lower raw proba — allow slight ease when peaks>=2
     if n_classes == 1:
-        need = 0.82 if peaks >= 2 else 0.88
+        need = 0.78 if peaks >= 2 else 0.84
         need_margin = 0.0
     elif n_classes <= 3:
-        need = 0.70 if peaks >= 2 else max(min_proba, 0.74)
-        need_margin = 0.14 if peaks >= 2 else 0.18
+        need = 0.66 if peaks >= 2 else max(min_proba - 0.02, 0.70)
+        need_margin = 0.10 if peaks >= 2 else 0.14
     else:
-        need = 0.66 if peaks >= 2 else max(min_proba, 0.70)
-        need_margin = 0.12 if peaks >= 2 else 0.15
-
-    if full_ranked and full_ranked[0]['id'] == best['id']:
-        if full_ranked[0]['proba'] < need - 0.06:
-            return {
-                'match': None,
-                'peek': peek,
-                'ranked': full_ranked[:3],
-                'engine': 'ml',
-                'reason': 'low_full',
-                'motion': gate,
-            }
+        need = 0.62 if peaks >= 2 else max(min_proba - 0.04, 0.66)
+        need_margin = 0.08 if peaks >= 2 else 0.12
 
     if best['proba'] >= need and margin >= need_margin:
         return {
             'match': {
                 'id': best['id'],
                 'name': best['name'],
-                'similarity': max(int(best['similarity']), 72),
+                'similarity': max(int(best['similarity']), 70),
                 'd': float(1.0 - best['proba']),
                 'n': best['n'],
                 'margin': round(float(margin), 4),
                 'engine': 'ml',
-                'window': best.get('window', 'full'),
+                'window': 'full',
                 'peaks': peaks,
             },
             'peek': peek,
-            'ranked': full_ranked[:3],
+            'ranked': ranked[:3],
             'engine': 'ml',
             'motion': gate,
         }
@@ -441,7 +409,7 @@ def predict(frames, signs: list[dict], min_proba: float = 0.68) -> dict | None:
     return {
         'match': None,
         'peek': peek,
-        'ranked': full_ranked[:3],
+        'ranked': ranked[:3],
         'engine': 'ml',
         'reason': 'low_conf',
         'motion': gate,

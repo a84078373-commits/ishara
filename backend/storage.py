@@ -17,6 +17,7 @@ from .config import (
 from .recognition import quality_score, resample
 
 _lock = threading.Lock()
+_signs_cache: list[dict] | None = None
 
 
 def _retrain(signs: list[dict] | None = None) -> dict:
@@ -65,13 +66,17 @@ def _migrate_samples(signs: list[dict]) -> list[dict]:
 
 
 def load_signs() -> list[dict]:
+    global _signs_cache
     with _lock:
+        if _signs_cache is not None:
+            return _signs_cache
         if not SIGNS_PATH.exists():
             signs = _default_signs()
             SIGNS_PATH.write_text(
                 json.dumps({'version': DATA_VERSION, 'signs': signs}, ensure_ascii=False, indent=2),
                 encoding='utf-8',
             )
+            _signs_cache = signs
             return signs
         data = json.loads(SIGNS_PATH.read_text(encoding='utf-8'))
         if not isinstance(data.get('signs'), list):
@@ -84,14 +89,17 @@ def load_signs() -> list[dict]:
             signs = _migrate_samples(signs)
             _save_unlocked(signs)
             return signs
+        _signs_cache = signs
         return signs
 
 
 def _save_unlocked(signs: list[dict]) -> None:
+    global _signs_cache
     SIGNS_PATH.write_text(
         json.dumps({'version': DATA_VERSION, 'signs': signs}, ensure_ascii=False, indent=2),
         encoding='utf-8',
     )
+    _signs_cache = signs
 
 
 def save_signs(signs: list[dict]) -> None:

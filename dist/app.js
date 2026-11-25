@@ -35,16 +35,16 @@ let verifyTarget = null;
 let verifyFailAt = 0;
 let recognizing = false;
 let lastRecognizeAt = 0;
-const SAME_SIGN_COOLDOWN_MS = 1600;
-/** Live: natural continuous gesture → short pause → recognize+speak. No forced part splits. */
-const LIVE_BUFFER_MS = 4500;
-const GESTURE_SETTLE_MS = 380;
-const MIN_GESTURE_MS = 700;
+const SAME_SIGN_COOLDOWN_MS = 650;
+/** Live: gesture ends → recognize+speak instantly (minimal settle). */
+const LIVE_BUFFER_MS = 4200;
+const GESTURE_SETTLE_MS = 70;
+const MIN_GESTURE_MS = 220;
 const MAX_GESTURE_MS = 4800;
-const MOTION_THRESH = 0.09;
-const MIN_MOTION_FRAMES = 5;
-const MIN_MOTION_SUM = 0.85;
-const MIN_MATCH_SCORE = 72;
+const MOTION_THRESH = 0.085;
+const MIN_MOTION_FRAMES = 3;
+const MIN_MOTION_SUM = 0.40;
+const MIN_MATCH_SCORE = 70;
 let gestureArmed = false;
 let gestureStartAt = 0;
 let lastMotionAt = 0;
@@ -1199,9 +1199,8 @@ function loop(now) {
         noHandAt = 0;
       }
 
-      // While recording: keep every detect. Live: natural continuous gesture.
-      const sampleEvery = recording ? 0 : 40;
-      if (now - lastFeature >= sampleEvery) {
+      // Live + record: every frame for instant response
+      if (now - lastFeature >= 0) {
         lastFeature = now;
         const f = features(result);
         if (recording) capture.push({ f, visible });
@@ -1230,7 +1229,7 @@ function loop(now) {
                 motionFrames = 0;
                 motionSum = 0;
                 if (!verifyTarget) {
-                  $('result-note').textContent = 'جاري التقاط الإشارة…';
+                  $('result-note').textContent = '…';
                   $('result-ring').textContent = '…';
                 }
               }
@@ -1242,7 +1241,7 @@ function loop(now) {
             const gestureMs = gestureArmed ? (now - gestureStartAt) : 0;
 
             // Cancel accidental micro-sway
-            if (gestureArmed && gestureMs >= 800 && motionFrames < 3 && (now - lastMotionAt) > 380) {
+            if (gestureArmed && gestureMs >= 500 && motionFrames < 2 && (now - lastMotionAt) > 220) {
               gestureArmed = false;
               motionFrames = 0;
               motionSum = 0;
@@ -1259,18 +1258,18 @@ function loop(now) {
             }
 
             const strongEnough = motionFrames >= MIN_MOTION_FRAMES && motionSum >= MIN_MOTION_SUM;
-            // Natural: finish the whole sign in one go, pause briefly → recognize
+            // Fire the moment motion pauses — no perceptible wait
             const settled = gestureArmed
               && strongEnough
               && (now - lastMotionAt) >= GESTURE_SETTLE_MS
               && gestureMs >= MIN_GESTURE_MS
-              && buffer.length >= 10;
+              && buffer.length >= 6;
 
-            if (settled && !recognizing && now - lastRecognizeAt > 280) {
+            if (settled && !recognizing && now - lastRecognizeAt > 90) {
               lastRecognizeAt = now;
-              const clip = buffer.filter((x) => x.t >= gestureStartAt - 80);
-              const frames = (clip.length >= 10 ? clip : buffer).map((x) => x.f);
-              const step = Math.max(1, Math.ceil(frames.length / 72));
+              const clip = buffer.filter((x) => x.t >= gestureStartAt - 40);
+              const frames = (clip.length >= 6 ? clip : buffer).map((x) => x.f);
+              const step = Math.max(1, Math.ceil(frames.length / 48));
               const payload = frames.filter((_, i) => i % step === 0);
 
               gestureArmed = false;
@@ -1317,13 +1316,12 @@ function loop(now) {
                 recognized(match);
                 latched = match.id;
                 latchedAt = nowMs;
-                buffer = buffer.filter((x) => nowMs - x.t < 450);
+                buffer = buffer.filter((x) => nowMs - x.t < 280);
                 lastFeatFrame = null;
               };
 
               if (flaskMode) {
                 recognizing = true;
-                $('result-note').textContent = 'تعرّف…';
                 api.recognize(payload).then((res) => {
                   recognizing = false;
                   applyResult(res.match, res.peek, res.reason);
@@ -1334,11 +1332,6 @@ function loop(now) {
               } else {
                 const windows = buildWindows(buffer);
                 applyResult(classify(windows, signs), peekMatch(windows, signs));
-              }
-            } else if (gestureArmed && strongEnough && gestureMs >= 400 && now - softPeekAt > 350) {
-              softPeekAt = now;
-              if (!verifyTarget) {
-                $('result-note').textContent = 'جاري التقاط الإشارة…';
               }
             } else if (!gestureArmed && !recognizing && !verifyTarget && now - softPeekAt > 2500) {
               softPeekAt = now;
