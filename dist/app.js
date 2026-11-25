@@ -35,7 +35,17 @@ let verifyTarget = null;
 let verifyFailAt = 0;
 let recognizing = false;
 let lastRecognizeAt = 0;
-const SAME_SIGN_COOLDOWN_MS = 900; // allow switching words instantly; same word after short gap
+const SAME_SIGN_COOLDOWN_MS = 1400;
+/** Live multi-part gesture capture (~3–4s), confirm after motion settles. */
+const LIVE_BUFFER_MS = 4200;
+const GESTURE_SETTLE_MS = 520;
+const MIN_GESTURE_MS = 1100;
+const MOTION_THRESH = 0.055;
+let gestureArmed = false;
+let gestureStartAt = 0;
+let lastMotionAt = 0;
+let lastFeatFrame = null;
+let softPeekAt = 0;
 
 const video = $('video');
 const canvas = $('overlay');
@@ -123,7 +133,7 @@ function updateLiveTrainHint() {
     const s = partial[0];
     $('result-note').textContent = `«${s.name}»: ${s.samples.length}/${MIN_SAMPLES} — سجّل مثالًا آخر من المكتبة`;
   } else {
-    $('result-note').textContent = 'من المكتبة: اختر كلمة ← ابدأ التسجيل ← مثالان على الأقل';
+    $('result-note').textContent = 'من المكتبة: اختر كلمة ← سجّل الإشارة كاملة (~4 ث) ← مثالان على الأقل';
   }
 }
 
@@ -257,16 +267,18 @@ function startVerify(id) {
   buffer = [];
   pending = null;
   latched = null;
+  gestureArmed = false;
+  lastFeatFrame = null;
   $('trainer').close();
   view('live');
   const name = signs[id].name;
-  setVerifyBanner('waiting', `⏳ اختبار: نفّذ إشارة «${name}» الآن — سنخبرك فور نجاح التعرّف`);
+  setVerifyBanner('waiting', `⏳ اختبار: نفّذ إشارة «${name}» كاملة (كل الأجزاء) ثم انتظر لحظة`);
   $('result').textContent = 'اختبار التعرّف…';
-  $('result-note').textContent = `انتظر العدّ الذهني ثم نفّذ «${name}» بوضوح مثل أمثلة التدريب`;
+  $('result-note').textContent = `نفّذ «${name}» خلال ~3–4 ثوانٍ كما درّبتها — النظام ينتظر اكتمال الحركة`;
   $('result-ring').textContent = '?';
   $('score').textContent = '—';
   $('meter-fill').style.width = '0%';
-  toast(`اختبار «${name}»: نفّذ الإشارة أمام الكاميرا`);
+  toast(`اختبار «${name}»: أكمل كل أجزاء الإشارة ثم توقف قليلًا`);
 }
 
 function showSuccess(match) {
@@ -1090,6 +1102,8 @@ function loop(now) {
           buffer = [];
           pending = null;
           latched = null;
+          gestureArmed = false;
+          lastFeatFrame = null;
           smoothHands = [];
           trails = [[], []];
         }
@@ -1097,65 +1111,125 @@ function loop(now) {
         noHandAt = 0;
       }
 
-      // While recording: keep every detect. Live mode: throttle a bit.
-      const sampleEvery = recording ? 0 : 50;
+      // While recording: keep every detect. Live mode: ~20 fps features.
+      const sampleEvery = recording ? 0 : 45;
       if (now - lastFeature >= sampleEvery) {
         lastFeature = now;
         const f = features(result);
         if (recording) capture.push({ f, visible });
         if (visible) {
-          buffer.push({ t: now, f });
-          buffer = buffer.filter((x) => now - x.t < 3200);
-          // Live recognition — short buffer + instant confirm for strong matches
-          if (!recording && buffer.length >= 5 && now - lastRecognizeAt > 55) {
-            lastRecognizeAt = now;
-            const frames = buffer.slice(-18).map((x) => x.f); // smaller payload = faster API
+          // Motion between consecutive feature frames (multi-part detection)
+          let motion = 0;
+          if (lastFeatFrame) {
+            let sum = 0;
+            const step = 4;
+            for (let i = 0; i < f.length; i += step) {
+              const d = f[i] - lastFeatFrame[i];
+              sum += d * d;
+            }
+            motion = Math.sqrt(sum / Math.ceil(f.length / step));
+          }
+          lastFeatFrame = f;
 
-            const applyResult = (match, peek) => {
-              if (!match && peek && peek.similarity >= 65) {
-                if (verifyTarget == null || peek.id === verifyTarget) {
-                  match = { id: peek.id, name: peek.name, similarity: peek.similarity, engine: 'peek' };
+          buffer.push({ t: now, f, motion });
+          buffer = buffer.filter((x) => now - x.t < LIVE_BUFFER_MS);
+
+          if (!recording) {
+            const moving = motion >= MOTION_THRESH;
+            if (moving) {
+              if (!gestureArmed) {
+                gestureArmed = true;
+                gestureStartAt = now;
+                if (!verifyTarget) {
+                  $('result-note').textContent = 'جاري التقاط الإشارة… أكمل كل الأجزاء';
+                  $('result-ring').textContent = '…';
                 }
               }
+              lastMotionAt = now;
+            }
 
-              if (!match && peek) {
-                $('result').textContent = peek.name;
-                $('score').textContent = peek.similarity + '%';
-                $('meter-fill').style.width = Math.max(8, peek.similarity) + '%';
-                $('result-note').textContent = `قريب من «${peek.name}»…`;
-                $('result-ring').textContent = '…';
-                if (pending != null && performance.now() - pendingAt < 350) return;
-                pending = null;
-                return;
-              }
+            const gestureMs = gestureArmed ? (now - gestureStartAt) : 0;
+            const settled = gestureArmed
+              && (now - lastMotionAt) >= GESTURE_SETTLE_MS
+              && gestureMs >= MIN_GESTURE_MS
+              && buffer.length >= 12;
 
-              if (match) {
-                const nowMs = performance.now();
-                // Same word: short cooldown. Different word: fire immediately.
-                if (latched === match.id && (nowMs - latchedAt) < SAME_SIGN_COOLDOWN_MS) return;
-                $('result').textContent = match.name;
-                $('score').textContent = match.similarity + '%';
-                $('meter-fill').style.width = match.similarity + '%';
-                recognized(match);
-                latched = match.id;
-                latchedAt = nowMs;
-              }
-            };
+            // Soft live peek while moving (UI only — never speak mid-gesture)
+            const wantSoftPeek = gestureArmed
+              && !settled
+              && gestureMs >= 700
+              && now - softPeekAt > 280
+              && !recognizing;
 
-            if (flaskMode) {
-              if (!recognizing) {
+            if (settled && !recognizing && now - lastRecognizeAt > 200) {
+              lastRecognizeAt = now;
+              // Prefer frames from this gesture start (full multi-part clip)
+              const clip = buffer.filter((x) => x.t >= gestureStartAt - 80);
+              const frames = (clip.length >= 10 ? clip : buffer).map((x) => x.f);
+              // Cap payload ~72 frames while keeping timing
+              const step = Math.max(1, Math.ceil(frames.length / 72));
+              const payload = frames.filter((_, i) => i % step === 0);
+
+              const applyResult = (match, peek) => {
+                if (!match && peek && peek.similarity >= 78) {
+                  // Only promote very strong peeks after settle — avoids short-word steal
+                  if (verifyTarget == null || peek.id === verifyTarget) {
+                    match = { id: peek.id, name: peek.name, similarity: peek.similarity, engine: 'peek' };
+                  }
+                }
+
+                if (!match && peek) {
+                  $('result').textContent = peek.name;
+                  $('score').textContent = peek.similarity + '%';
+                  $('meter-fill').style.width = Math.max(8, peek.similarity) + '%';
+                  $('result-note').textContent = `قريب من «${peek.name}» — أعد الحركة أوضح`;
+                  $('result-ring').textContent = '…';
+                  gestureArmed = false;
+                  return;
+                }
+
+                if (match) {
+                  const nowMs = performance.now();
+                  if (latched === match.id && (nowMs - latchedAt) < SAME_SIGN_COOLDOWN_MS) {
+                    gestureArmed = false;
+                    return;
+                  }
+                  $('result').textContent = match.name;
+                  $('score').textContent = match.similarity + '%';
+                  $('meter-fill').style.width = match.similarity + '%';
+                  recognized(match);
+                  latched = match.id;
+                  latchedAt = nowMs;
+                  gestureArmed = false;
+                  // Keep a short tail so next gesture can start cleanly
+                  buffer = buffer.filter((x) => nowMs - x.t < 600);
+                  lastFeatFrame = null;
+                }
+              };
+
+              if (flaskMode) {
                 recognizing = true;
-                api.recognize(frames).then((res) => {
+                $('result-note').textContent = 'تحليل الإشارة الكاملة…';
+                api.recognize(payload).then((res) => {
                   recognizing = false;
                   applyResult(res.match, res.peek);
                 }).catch((err) => {
                   recognizing = false;
+                  gestureArmed = false;
                   console.warn('recognize failed', err);
                 });
+              } else {
+                const windows = buildWindows(buffer);
+                applyResult(classify(windows, signs), peekMatch(windows, signs));
+                gestureArmed = false;
               }
-            } else {
-              const windows = buildWindows(buffer);
-              applyResult(classify(windows, signs), peekMatch(windows, signs));
+            } else if (wantSoftPeek && flaskMode) {
+              softPeekAt = now;
+              const recent = buffer.filter((x) => x.t >= gestureStartAt - 80).map((x) => x.f);
+              if (recent.length >= 10 && !recognizing) {
+                // lightweight progress hint only
+                $('result-note').textContent = `التقاط… ${Math.min(4, (gestureMs / 1000)).toFixed(1)} ث — أكمل الحركة`;
+              }
             }
           }
         }
@@ -1265,22 +1339,25 @@ $('record').onclick = async () => {
     }
 
     capture = [];
-    const captureMs = 3500;
+    const captureMs = 4000; // full multi-part gestures (e.g. كيف حالك)
     const started = performance.now();
     $('recording').textContent = '●';
     while (performance.now() - started < captureMs) {
       if (!running || session !== token) throw Error('تم إلغاء التسجيل.');
       const p = 45 + ((performance.now() - started) / captureMs) * 50;
       const liveVisible = $('hands').textContent.includes('ظاهرة');
+      const secLeft = Math.max(0, ((captureMs - (performance.now() - started)) / 1000)).toFixed(1);
       setCoach({
         title: `تدريب «${word}» · مثال ${takeNum}`,
-        step: '● سجّل الآن — نفّذ الإشارة',
+        step: '● سجّل الآن — نفّذ كل أجزاء الإشارة',
         hand: liveVisible ? `✓ يد ظاهرة · إطارات ${capture.length}` : '⚠ أرجع اليد للإطار',
         handOk: liveVisible,
-        hint: liveVisible ? `كمّل الحركة (${capture.length} إطار)` : 'اليد اختفت — أرجعها بسرعة',
+        hint: liveVisible
+          ? `أكمل كل الحركات (${secLeft} ث متبقية)`
+          : 'اليد اختفت — أرجعها بسرعة',
         progress: p,
       });
-      showTrainResult(false, 'جاري التسجيل…', liveVisible ? `حفظ «${word}» · ${capture.length} إطار` : 'أظهر اليد الآن');
+      showTrainResult(false, 'جاري التسجيل…', liveVisible ? `حفظ «${word}» كاملًا · ${capture.length} إطار` : 'أظهر اليد الآن');
       await wait(40);
     }
 

@@ -3,12 +3,12 @@ export const WORDS = [
   'مرحبًا', 'شكرًا', 'نعم', 'لا', 'من فضلك', 'آسف', 'أنا', 'أنت', 'مساعدة', 'ماء',
   'طعام', 'بيت', 'مدرسة', 'أهلًا وسهلًا', 'كيف حالك', 'بخير', 'أحبك', 'انتظر', 'أين', 'مع السلامة',
 ];
-export const SEQ_LEN = 16;
+export const SEQ_LEN = 24;
 export const FEAT_DIM = 152;
 export const MAX_SAMPLES = 12;
 export const MIN_SAMPLES = 2;
 export const MAX_SIGNS = 48;
-export const DATA_VERSION = 2;
+export const DATA_VERSION = 3;
 
 const TIP = [4, 8, 12, 16, 20];
 const PIP = [3, 6, 10, 14, 18];
@@ -122,19 +122,18 @@ export function trimIdle(frames, thresh = 0.035) {
   return cut.length >= 4 ? cut : frames;
 }
 
-/** Build several candidate windows from a live buffer for robust matching. */
+/** Build several candidate windows — include full multi-part (~4s) clip first. */
 export function buildWindows(bufferEntries) {
   if (!bufferEntries?.length) return [];
   const now = bufferEntries[bufferEntries.length - 1].t;
-  const spans = [800, 1200, 1800, 2600];
+  const spans = [4200, 3200, 2200, 1400];
   const out = [];
   for (const ms of spans) {
     const slice = bufferEntries.filter((x) => now - x.t <= ms).map((x) => x.f);
     if (slice.length < 8) continue;
     out.push(resample(trimIdle(slice)));
-    out.push(resample(slice));
+    if (ms >= 3000) out.push(resample(slice));
   }
-  // Full buffer trimmed once
   const all = bufferEntries.map((x) => x.f);
   if (all.length >= 8) out.push(resample(trimIdle(all)));
   return out;
@@ -233,18 +232,21 @@ export function selfConsistency(sign) {
 }
 
 export function validateData(data) {
-  if (data?.version !== DATA_VERSION || !Array.isArray(data.signs)) throw Error('ملف التدريب غير صالح');
+  if (!Array.isArray(data?.signs)) throw Error('ملف التدريب غير صالح');
+  // Accept v2→v3 soft migrate (resample 16→24)
+  if (data.version !== DATA_VERSION && data.version !== 2) throw Error('ملف التدريب غير صالح');
   if (data.signs.length < 1 || data.signs.length > MAX_SIGNS) throw Error('عدد الإشارات غير صالح');
   return data.signs.map((s, i) => {
     if (s.id !== i || typeof s.name !== 'string' || !s.name.trim() || s.name.length > 40) {
       throw Error('بيانات الإشارات غير صالحة');
     }
     if (!Array.isArray(s.samples) || s.samples.length > MAX_SAMPLES) throw Error('بيانات الإشارات غير صالحة');
-    for (const sample of s.samples) {
+    const samples = s.samples.map((sample) => {
+      if (!Array.isArray(sample) || sample.length < 4) throw Error('بيانات الحركة غير صالحة');
+      const normalized = sample.length === SEQ_LEN ? sample : resample(sample, SEQ_LEN);
       if (
-        !Array.isArray(sample) ||
-        sample.length !== SEQ_LEN ||
-        sample.some(
+        normalized.length !== SEQ_LEN ||
+        normalized.some(
           (f) =>
             !Array.isArray(f) ||
             f.length !== FEAT_DIM ||
@@ -253,11 +255,12 @@ export function validateData(data) {
       ) {
         throw Error('بيانات الحركة غير صالحة');
       }
-    }
+      return normalized;
+    });
     return {
       id: i,
       name: s.name.trim(),
-      samples: s.samples,
+      samples,
       verified: !!s.verified,
       verifyHits: Math.max(0, Math.min(99, Number(s.verifyHits) || 0)),
     };

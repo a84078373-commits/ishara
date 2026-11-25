@@ -93,22 +93,26 @@ def motion_distance(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def build_windows(raw_frames: list) -> list[np.ndarray]:
-    """Build a few candidate windows — kept small for low latency."""
+    """Multi-scale windows — include full multi-part clip, not only a short tail."""
     if not raw_frames:
         return []
     arr = np.asarray(raw_frames, dtype=np.float64)
     out: list[np.ndarray] = []
-    spans = [10, 16, arr.shape[0]]
+    n = arr.shape[0]
+    spans = [n, max(16, (2 * n) // 3), max(12, n // 2), 16]
+    seen = set()
     for span in spans:
-        if arr.shape[0] < 5:
+        if n < 5:
             continue
-        slice_ = arr[-span:] if span < arr.shape[0] else arr
-        if slice_.shape[0] < 5:
+        slice_ = arr[-span:] if span < n else arr
+        key = (slice_.shape[0], int(slice_[0, 0] * 1000) if slice_.size else 0)
+        if key in seen or slice_.shape[0] < 5:
             continue
+        seen.add(key)
         out.append(resample(trim_idle(slice_)))
     if not out:
         out.append(resample(arr))
-    return out[:4]
+    return out[:5]
 
 
 def sign_score(windows: list[np.ndarray], samples: list) -> float:

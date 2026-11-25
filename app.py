@@ -142,12 +142,23 @@ def verify_sign(sign_id: int):
         return _err(e)
 
 
+def _downsample_frames(frames: list, max_n: int = 72) -> list:
+    """Keep multi-part timing but cap payload size for speed."""
+    n = len(frames)
+    if n <= max_n:
+        return frames
+    import numpy as np
+    idx = np.linspace(0, n - 1, max_n)
+    return [frames[int(round(i))] for i in idx]
+
+
 @app.post('/api/recognize')
 def recognize():
     try:
         frames = (request.json or {}).get('frames') or []
-        if len(frames) < 4:
+        if len(frames) < 6:
             return jsonify({'ok': True, 'match': None, 'peek': None, 'reason': 'short'})
+        frames = _downsample_frames(frames, 72)
         signs = storage.load_signs()
         model = ml_model.status()
 
@@ -159,7 +170,7 @@ def recognize():
         if ml and ml.get('match'):
             return jsonify({'ok': True, **ml})
 
-        # Cold start / no model yet — DTW fallback
+        # Cold start / no model yet — DTW fallback on full multi-part window
         dtw = recognition.classify(frames, signs) or {}
         if dtw.get('match'):
             dtw['match']['engine'] = 'dtw'

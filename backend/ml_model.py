@@ -1,4 +1,4 @@
-"""Trainable gesture classifier — real ML model you teach with your words."""
+"""Trainable gesture classifier — multi-part sequence aware."""
 from __future__ import annotations
 
 import json
@@ -12,7 +12,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from .config import DATA_DIR, FEAT_DIM, MIN_SAMPLES, SEQ_LEN
-from .recognition import resample, trim_idle
+from .recognition import resample, trim_idle, frame_distance
 
 MODEL_PATH = DATA_DIR / 'gesture_model.joblib'
 META_PATH = DATA_DIR / 'gesture_model_meta.json'
@@ -44,19 +44,62 @@ def _channel_indices() -> list[int]:
 CHANNELS = _channel_indices()
 
 
+def motion_profile(frames) -> np.ndarray:
+    """Per-frame motion energy — captures multi-part peaks."""
+    arr = np.asarray(frames, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape[0] < 2:
+        return np.zeros(1, dtype=np.float64)
+    motion = np.zeros(arr.shape[0], dtype=np.float64)
+    for i in range(1, arr.shape[0]):
+        motion[i] = frame_distance(arr[i], arr[i - 1])
+    return motion
+
+
+def count_motion_peaks(motion: np.ndarray, thresh: float = 0.045) -> int:
+    if motion.size < 3:
+        return 0
+    peaks = 0
+    active = False
+    for v in motion:
+        if v >= thresh and not active:
+            peaks += 1
+            active = True
+        elif v < thresh * 0.55:
+            active = False
+    return peaks
+
+
 def embed_sequence(frames) -> np.ndarray:
-    seq = np.asarray(frames, dtype=np.float64)
-    if seq.ndim != 2 or seq.shape[0] == 0:
-        seq = np.zeros((SEQ_LEN, FEAT_DIM))
-    seq = resample(trim_idle(seq), SEQ_LEN)
+    """Temporal embedding: whole clip + 3 segments + motion peaks (multi-part)."""
+    raw = np.asarray(frames, dtype=np.float64)
+    if raw.ndim != 2 or raw.shape[0] == 0:
+        raw = np.zeros((SEQ_LEN, FEAT_DIM))
+    trimmed = trim_idle(raw)
+    seq = resample(trimmed, SEQ_LEN)
     sub = seq[:, CHANNELS]
     vel = np.diff(sub, axis=0, prepend=sub[:1])
     acc = np.diff(vel, axis=0, prepend=vel[:1])
+
+    # 5 keyframes across the full multi-part sequence
     picks = [0, SEQ_LEN // 4, SEQ_LEN // 2, (3 * SEQ_LEN) // 4, SEQ_LEN - 1]
     keyframes = sub[picks].reshape(-1)
+
+    # Three temporal thirds — distinguishes prefix-only vs full gesture
+    thirds = []
+    for t0, t1 in ((0, SEQ_LEN // 3), (SEQ_LEN // 3, 2 * SEQ_LEN // 3), (2 * SEQ_LEN // 3, SEQ_LEN)):
+        part = sub[t0:t1]
+        thirds.append(part.mean(axis=0))
+        thirds.append(part.std(axis=0))
+    thirds_vec = np.concatenate(thirds)
+
+    motion = motion_profile(trimmed if trimmed.shape[0] >= 4 else seq)
     motion_energy = np.linalg.norm(vel, axis=1)
+    peaks = float(count_motion_peaks(motion))
+    duration_proxy = float(min(1.0, trimmed.shape[0] / 60.0))  # ~3s at 20fps → 1.0
+
     vec = np.concatenate([
         keyframes,
+        thirds_vec,
         sub.mean(axis=0),
         sub.std(axis=0),
         vel.mean(axis=0),
@@ -67,6 +110,8 @@ def embed_sequence(frames) -> np.ndarray:
             motion_energy.std(),
             motion_energy.max(),
             float(np.argmax(motion_energy)) / max(1, SEQ_LEN - 1),
+            peaks / 5.0,
+            duration_proxy,
         ]),
     ]).astype(np.float64)
     return np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0)
@@ -81,8 +126,15 @@ def _dataset(signs: list[dict]):
             continue
         labels.append({'id': int(s['id']), 'name': s['name']})
         for sample in samples:
-            X.append(embed_sequence(sample))
+            arr = np.asarray(sample, dtype=np.float64)
+            X.append(embed_sequence(arr))
             y.append(int(s['id']))
+            # Light augmentation: slight time jitter via trim variants
+            if arr.shape[0] >= 8:
+                X.append(embed_sequence(arr[1:]))
+                y.append(int(s['id']))
+                X.append(embed_sequence(arr[:-1]))
+                y.append(int(s['id']))
     if not X:
         return None, None, []
     return np.vstack(X), np.asarray(y, dtype=np.int64), labels
@@ -106,8 +158,8 @@ def train_from_signs(signs: list[dict]) -> dict:
     min_per_class = int(positive.min()) if len(positive) else 0
 
     base = ExtraTreesClassifier(
-        n_estimators=320,
-        max_depth=20,
+        n_estimators=360,
+        max_depth=22,
         min_samples_leaf=1,
         class_weight='balanced_subsample',
         random_state=42,
@@ -132,9 +184,11 @@ def train_from_signs(signs: list[dict]) -> dict:
         'samples': int(len(y)),
         'labels': labels,
         'dim': int(X.shape[1]),
-        'engine': 'extratrees+scaler',
+        'engine': 'extratrees+multipart',
+        'seqLen': SEQ_LEN,
     }
     with _lock:
+        # Dimension changed — drop old incompatible model file first
         joblib.dump({'model': pipe, 'meta': meta}, MODEL_PATH)
         META_PATH.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding='utf-8')
         _bundle = {'model': pipe, 'meta': meta}
@@ -148,8 +202,12 @@ def load_model() -> dict | None:
             return _bundle
         if not MODEL_PATH.exists():
             return None
-        _bundle = joblib.load(MODEL_PATH)
-        return _bundle
+        try:
+            _bundle = joblib.load(MODEL_PATH)
+            return _bundle
+        except Exception:
+            _bundle = None
+            return None
 
 
 def status() -> dict:
@@ -173,24 +231,12 @@ def _classes_of(model) -> list[int]:
     return []
 
 
-def predict(frames, signs: list[dict], min_proba: float = 0.48) -> dict | None:
-    bundle = load_model()
-    if not bundle or not bundle.get('model'):
-        return None
-
-    model = bundle['model']
-    ready = {int(s['id']): s for s in signs if len(s.get('samples') or []) >= MIN_SAMPLES}
-    if not ready:
-        return None
-
-    # One embedding on the trimmed full clip — much faster than multi-window
-    classes = _classes_of(model)
-    if not classes or not hasattr(model, 'predict_proba'):
-        return None
-
-    emb = embed_sequence(resample(trim_idle(np.asarray(frames, dtype=np.float64)))).reshape(1, -1)
-    proba = model.predict_proba(emb)[0]
-
+def _score_window(model, frames, ready: dict, classes: list[int]) -> list[dict]:
+    emb = embed_sequence(frames).reshape(1, -1)
+    try:
+        proba = model.predict_proba(emb)[0]
+    except Exception:
+        return []
     ranked = []
     for i, cid in enumerate(classes):
         if cid not in ready:
@@ -203,38 +249,103 @@ def predict(frames, signs: list[dict], min_proba: float = 0.48) -> dict | None:
             'n': len(ready[cid]['samples']),
         })
     ranked.sort(key=lambda x: x['proba'], reverse=True)
-    if not ranked:
+    return ranked
+
+
+def predict(frames, signs: list[dict], min_proba: float = 0.42) -> dict | None:
+    """
+    Multi-window predict: prefers the FULL gesture window so short prefixes
+    (e.g. first move of «كيف حالك») don't steal the match from a shorter word.
+    """
+    bundle = load_model()
+    if not bundle or not bundle.get('model'):
         return None
 
-    best = ranked[0]
-    second = ranked[1] if len(ranked) > 1 else None
-    margin = best['proba'] - (second['proba'] if second else 0.0)
+    model = bundle['model']
+    ready = {int(s['id']): s for s in signs if len(s.get('samples') or []) >= MIN_SAMPLES}
+    if not ready:
+        return None
+
+    classes = _classes_of(model)
+    if not classes or not hasattr(model, 'predict_proba'):
+        return None
+
+    arr = np.asarray(frames, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape[0] < 4:
+        return None
+
+    n = arr.shape[0]
+    # Build candidate windows: full multi-part first, then shorter tails
+    windows: list[tuple[str, float, np.ndarray]] = [
+        ('full', 1.20, arr),
+    ]
+    if n >= 16:
+        windows.append(('body', 1.05, arr[max(0, n // 8):]))
+    if n >= 24:
+        windows.append(('tail', 0.82, arr[-max(10, n // 3):]))
+
+    # Aggregate weighted votes across windows
+    scores: dict[int, float] = {}
+    best_by_id: dict[int, dict] = {}
+    for kind, weight, win in windows:
+        ranked = _score_window(model, win, ready, classes)
+        for row in ranked[:4]:
+            cid = row['id']
+            val = row['proba'] * weight
+            if val > scores.get(cid, -1):
+                scores[cid] = val
+                best_by_id[cid] = {**row, 'window': kind, 'weighted': val}
+
+    if not scores:
+        return None
+
+    ordered = sorted(best_by_id.values(), key=lambda x: x['weighted'], reverse=True)
+    best = ordered[0]
+    second = ordered[1] if len(ordered) > 1 else None
+    margin = best['weighted'] - (second['weighted'] if second else 0.0)
+
+    # Raw full-window ranking for peek UI
+    full_ranked = _score_window(model, arr, ready, classes) or ordered
+    peek_src = full_ranked[0]
     peek = {
-        'id': best['id'],
-        'name': best['name'],
-        'similarity': best['similarity'],
-        'd': float(1.0 - best['proba']),
-        'n': best['n'],
+        'id': peek_src['id'],
+        'name': peek_src['name'],
+        'similarity': peek_src['similarity'],
+        'd': float(1.0 - peek_src['proba']),
+        'n': peek_src['n'],
     }
 
-    # One class: sensitive. Multiple classes: require clearer margin for accuracy.
-    n_classes = len(ranked)
-    need = 0.28 if n_classes == 1 else min_proba
-    need_margin = 0.0 if n_classes == 1 else (0.10 if n_classes <= 3 else 0.08)
+    n_classes = len(ready)
+    need = 0.26 if n_classes == 1 else min_proba
+    need_margin = 0.0 if n_classes == 1 else (0.08 if n_classes <= 3 else 0.07)
+
+    # Reject short-tail-only wins when full window disagrees (anti prefix-confusion)
+    if best.get('window') == 'tail' and full_ranked:
+        full_best = full_ranked[0]
+        if full_best['id'] != best['id'] and full_best['proba'] >= 0.28:
+            best = {
+                **full_best,
+                'window': 'full',
+                'weighted': full_best['proba'] * 1.20,
+            }
+            second = full_ranked[1] if len(full_ranked) > 1 else None
+            margin = best['proba'] - (second['proba'] if second else 0.0)
+
     if best['proba'] >= need and margin >= need_margin:
         return {
             'match': {
                 'id': best['id'],
                 'name': best['name'],
-                'similarity': max(best['similarity'], 55),
+                'similarity': max(int(best['similarity']), 55),
                 'd': float(1.0 - best['proba']),
                 'n': best['n'],
-                'margin': round(margin, 4),
+                'margin': round(float(margin), 4),
                 'engine': 'ml',
+                'window': best.get('window', 'full'),
             },
             'peek': peek,
-            'ranked': ranked[:3],
+            'ranked': full_ranked[:3],
             'engine': 'ml',
         }
 
-    return {'match': None, 'peek': peek, 'ranked': ranked[:3], 'engine': 'ml'}
+    return {'match': None, 'peek': peek, 'ranked': full_ranked[:3], 'engine': 'ml'}

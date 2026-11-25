@@ -44,6 +44,26 @@ def _validate_sample(sample) -> list:
     return arr.tolist()
 
 
+def _migrate_samples(signs: list[dict]) -> list[dict]:
+    """Resample stored clips to current SEQ_LEN without wiping training."""
+    out = []
+    for i, s in enumerate(signs):
+        samples = []
+        for sample in (s.get('samples') or []):
+            try:
+                samples.append(_validate_sample(sample))
+            except Exception:
+                continue
+        out.append({
+            'id': i,
+            'name': str(s.get('name') or f'كلمة {i + 1}')[:40],
+            'samples': samples,
+            'verified': bool(s.get('verified')),
+            'verifyHits': int(s.get('verifyHits') or 0),
+        })
+    return out
+
+
 def load_signs() -> list[dict]:
     with _lock:
         if not SIGNS_PATH.exists():
@@ -54,11 +74,17 @@ def load_signs() -> list[dict]:
             )
             return signs
         data = json.loads(SIGNS_PATH.read_text(encoding='utf-8'))
-        if data.get('version') != DATA_VERSION or not isinstance(data.get('signs'), list):
+        if not isinstance(data.get('signs'), list):
             signs = _default_signs()
             _save_unlocked(signs)
             return signs
-        return data['signs']
+        signs = data['signs']
+        # Soft migrate older versions (keep words + resample sequences)
+        if data.get('version') != DATA_VERSION:
+            signs = _migrate_samples(signs)
+            _save_unlocked(signs)
+            return signs
+        return signs
 
 
 def _save_unlocked(signs: list[dict]) -> None:
