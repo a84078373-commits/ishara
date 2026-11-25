@@ -154,6 +154,11 @@ def _downsample_frames(frames: list, max_n: int = 72) -> list:
 
 @app.post('/api/recognize')
 def recognize():
+    """
+    Automatic isolated-sign recognition from MediaPipe joint sequences:
+    1) reject idle  2) ExtraTrees on kinematic embedding  3) DTW joint-path check
+    User performs the sign once naturally — no manual step splitting.
+    """
     try:
         frames = (request.json or {}).get('frames') or []
         if len(frames) < 6:
@@ -162,28 +167,58 @@ def recognize():
         signs = storage.load_signs()
         model = ml_model.status()
 
-        # Fast path: trained ML only (skip slow DTW for snappy live UX)
-        ml = ml_model.predict(frames, signs)
-        if model.get('ready'):
-            return jsonify({'ok': True, **(ml or {'match': None, 'peek': None, 'engine': 'ml'})})
-
-        if ml and ml.get('match'):
+        ml = ml_model.predict(frames, signs) or {}
+        if model.get('ready') and ml.get('reason') == 'idle':
             return jsonify({'ok': True, **ml})
 
-        # Cold start / no model yet — DTW fallback on full multi-part window
+        # Joint-path DTW on the same landmark sequence (global SLR-style matcher)
         dtw = recognition.classify(frames, signs) or {}
+
+        if model.get('ready') and ml.get('match'):
+            m = ml['match']
+            # Fusion: if DTW strongly prefers another class, withhold (precision first)
+            dtw_match = dtw.get('match')
+            dtw_peek = dtw.get('peek')
+            if dtw_match and dtw_match.get('id') != m['id'] and dtw_match.get('similarity', 0) >= 82:
+                return jsonify({
+                    'ok': True,
+                    'match': None,
+                    'peek': m,
+                    'ranked': ml.get('ranked'),
+                    'engine': 'ml+dtw',
+                    'reason': 'disagree',
+                })
+            if dtw_peek and dtw_peek.get('id') == m['id']:
+                m = {
+                    **m,
+                    'similarity': max(int(m.get('similarity') or 0), int(dtw_peek.get('similarity') or 0)),
+                    'engine': 'ml+joints',
+                }
+                ml['match'] = m
+            ml['engine'] = ml.get('engine') or 'ml'
+            return jsonify({'ok': True, **ml})
+
+        if model.get('ready'):
+            # No confident ML — don't force a weak DTW hit (avoids idle false speaks)
+            return jsonify({
+                'ok': True,
+                'match': None,
+                'peek': ml.get('peek') or dtw.get('peek'),
+                'ranked': ml.get('ranked') or dtw.get('ranked'),
+                'engine': 'ml',
+                'reason': ml.get('reason') or 'low_conf',
+            })
+
         if dtw.get('match'):
             dtw['match']['engine'] = 'dtw'
             dtw['engine'] = 'dtw'
             return jsonify({'ok': True, **dtw})
-        if ml and ml.get('peek'):
-            return jsonify({'ok': True, 'match': None, 'peek': ml['peek'], 'ranked': ml.get('ranked'), 'engine': 'ml'})
         return jsonify({
             'ok': True,
             'match': None,
-            'peek': dtw.get('peek'),
-            'ranked': dtw.get('ranked'),
-            'engine': dtw.get('engine') or 'dtw',
+            'peek': dtw.get('peek') or ml.get('peek'),
+            'ranked': dtw.get('ranked') or ml.get('ranked'),
+            'engine': 'dtw',
         })
     except Exception as e:
         return _err(e, 500)

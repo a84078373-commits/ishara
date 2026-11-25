@@ -207,12 +207,14 @@ def add_sample(sign_id: int, frames: list) -> dict:
 
     analysis = ml_model.analyze_gesture(frames)
     if not analysis.get('ok'):
-        raise ValueError('الحركة ضعيفة أو غير واضحة — نفّذ الإشارة بجزئيها بوضوح ثم أعد التسجيل')
+        raise ValueError('الحركة ضعيفة أو غير واضحة — نفّذ الإشارة كاملة بوضوح مرة واحدة')
 
     q = quality_score(frames)
-    # Boost quality when two motion beats are visible
+    # Richer joint motion → higher quality score
+    if float(analysis.get('mean') or 0) >= 0.04:
+        q = max(q, 72)
     if int(analysis.get('peaks') or 0) >= 2:
-        q = max(q, 78)
+        q = max(q, 80)
     sample = _validate_sample(frames)
     signs = load_signs()
     with _lock:

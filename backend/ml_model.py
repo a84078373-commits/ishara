@@ -252,7 +252,7 @@ def train_from_signs(signs: list[dict]) -> dict:
         'samples': int(len(y)),
         'labels': labels,
         'dim': int(X.shape[1]),
-        'engine': 'extratrees+twobeat',
+        'engine': 'extratrees+joints',
         'seqLen': SEQ_LEN,
     }
     with _lock:
